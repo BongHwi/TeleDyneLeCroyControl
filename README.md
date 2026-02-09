@@ -27,7 +27,14 @@ cd scope
 ## Quick Start
 
 ```python
-from teledyne_lecroy import WavePro, ChannelConfig, AcquisitionConfig, TriggerConfig, TriggerSlope
+from teledyne_lecroy import (
+    WavePro,
+    ChannelConfig,
+    ChannelTrigger,
+    AcquisitionConfig,
+    TriggerConfig,
+    TriggerState,
+)
 
 # Connect to oscilloscope (default: LXI, optional: protocol="vicp")
 with WavePro("192.168.0.10", protocol="lxi") as scope:
@@ -45,8 +52,9 @@ with WavePro("192.168.0.10", protocol="lxi") as scope:
 
     # Set trigger
     scope.set_trigger(TriggerConfig(
-        source_channels=[1],
-        slope=TriggerSlope.RISING,
+        channels={
+            1: ChannelTrigger(state=TriggerState.HIGH, level=0.02),
+        },
         mode="SINGLE",
     ))
 
@@ -101,10 +109,20 @@ AcquisitionConfig(
 
 ```python
 TriggerConfig(
-    source_channels: list[int] = [1],
-    slope: TriggerSlope = TriggerSlope.FALLING,  # RISING, FALLING, EITHER
-    level_offset: float = -0.01,   # V relative to baseline
+    channels: dict[int, ChannelTrigger] = {},
     mode: Literal["AUTO", "NORM", "SINGLE", "STOP"] = "SINGLE",
+    external: bool = False,
+    external_level: float = 1.25,
+)
+```
+
+`ChannelTrigger` values:
+
+```python
+ChannelTrigger(
+    state: TriggerState = TriggerState.DONT_CARE,  # HIGH, LOW, DONT_CARE
+    level: float | None = None,                    # absolute level (V)
+    level_offset: float = 0.0,                     # relative level (V)
 )
 ```
 
