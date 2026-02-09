@@ -1,7 +1,6 @@
-#!/usr/bin/env python3
-"""Public facade module for Teledyne LeCroy oscilloscope control."""
+"""Internal core package for Teledyne LeCroy control."""
 
-from teledyne_lecroy_core import (
+from .scope import (
     SETTINGS_OPTIONS,
     AcquisitionConfig,
     AuxOutputMode,
