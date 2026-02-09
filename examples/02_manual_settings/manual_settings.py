@@ -25,12 +25,12 @@ from teledyne_lecroy import (
 )
 
 
-def make_scope(model: str, address: str):
+def make_scope(model: str, address: str, protocol: str):
     """Create a scope instance based on model name."""
     if model == "wavepro":
-        return WavePro(address)
+        return WavePro(address, protocol=protocol)
     if model == "waverunner":
-        return WaveRunner(address)
+        return WaveRunner(address, protocol=protocol)
     raise ValueError(f"Unknown model: {model}")
 
 
@@ -41,6 +41,7 @@ def parse_args():
     )
     p.add_argument("--model", choices=["wavepro", "waverunner"], default="wavepro")
     p.add_argument("--address", default="192.168.0.10")
+    p.add_argument("--protocol", choices=["lxi", "vicp"], default="lxi")
     p.add_argument(
         "--config",
         type=Path,
@@ -94,7 +95,7 @@ def apply_settings(scope, config_path: Path) -> None:
 def main() -> None:
     args = parse_args()
     try:
-        with make_scope(args.model, args.address) as scope:
+        with make_scope(args.model, args.address, args.protocol) as scope:
             if args.config is None:
                 # Read mode: save current scope settings to file
                 read_settings(scope, args.output, args.force)

@@ -19,12 +19,12 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 from teledyne_lecroy import ScopeConnectionError, ScopeTimeoutError, SequenceData, WaveformData, WavePro, WaveRunner
 
 
-def make_scope(model: str, address: str):
+def make_scope(model: str, address: str, protocol: str):
     """Create a scope instance based on model name."""
     if model == "wavepro":
-        return WavePro(address)
+        return WavePro(address, protocol=protocol)
     if model == "waverunner":
-        return WaveRunner(address)
+        return WaveRunner(address, protocol=protocol)
     raise ValueError(f"Unknown model: {model}")
 
 
@@ -88,6 +88,7 @@ def parse_args():
     p = argparse.ArgumentParser(description="Capture sequence waveforms using current scope settings.")
     p.add_argument("--model", choices=["wavepro", "waverunner"], default="wavepro")
     p.add_argument("--address", default="192.168.0.10")
+    p.add_argument("--protocol", choices=["lxi", "vicp"], default="lxi")
     p.add_argument("--outdir", type=Path, default=Path("."))
     p.add_argument("--segments", type=int, default=100, help="Number of segments to capture (default: 100)")
     p.add_argument("--channels", type=int, nargs="+", help="Channels to capture (default: all enabled)")
@@ -116,7 +117,7 @@ def main() -> None:
     args.outdir.mkdir(parents=True, exist_ok=True)
 
     try:
-        with make_scope(args.model, args.address) as scope:
+        with make_scope(args.model, args.address, args.protocol) as scope:
             # Handle settings: apply from file or save current
             if args.config:
                 print(f"Loading settings from: {args.config}")

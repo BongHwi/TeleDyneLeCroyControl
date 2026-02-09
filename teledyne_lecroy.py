@@ -256,10 +256,16 @@ class TeledyneLecroyScope(ABC):
     def __init__(
         self,
         address: str,
+        protocol: Literal["lxi", "vicp"] = "lxi",
         timeout: float = 30.0,
         active_channels: list[int] | None = None,
     ) -> None:
         self._address = address
+        self._protocol = protocol.lower()
+        if self._protocol not in ("lxi", "vicp"):
+            raise ScopeConfigurationError(
+                f"Invalid protocol: {protocol}. Use 'lxi' or 'vicp'."
+            )
         self._timeout = timeout
         self._active_channels = active_channels or [1, 2, 3, 4]
         self._scope: MessageBasedResource | None = None
@@ -297,8 +303,9 @@ class TeledyneLecroyScope(ABC):
 
         try:
             self._rm = pyvisa.ResourceManager()
+            resource_name = self._build_resource_name()
             self._scope = self._rm.open_resource(
-                f"TCPIP0::{self._address}::inst0::INSTR",
+                resource_name,
                 resource_pyclass=MessageBasedResource,
             )
             self._scope.timeout = int(self._timeout * 1000)
@@ -314,7 +321,16 @@ class TeledyneLecroyScope(ABC):
             self._settings = self.read_all_settings()
 
         except pyvisa.Error as e:
-            raise ScopeConnectionError(f"Connection failed: {self._address}") from e
+            raise ScopeConnectionError(
+                f"Connection failed ({self._protocol.upper()}): {self._address}"
+            ) from e
+
+    def _build_resource_name(self) -> str:
+        """Build VISA resource name from selected transport protocol."""
+        if self._protocol == "vicp":
+            return f"VICP::{self._address}::INSTR"
+        # LXI over VISA/TCPIP (existing behavior)
+        return f"TCPIP0::{self._address}::inst0::INSTR"
 
     def disconnect(self) -> None:
         """Close connection to scope."""

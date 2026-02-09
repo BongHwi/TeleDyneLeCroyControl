@@ -29,8 +29,8 @@ cd scope
 ```python
 from teledyne_lecroy import WavePro, ChannelConfig, AcquisitionConfig, TriggerConfig, TriggerSlope
 
-# Connect to oscilloscope
-with WavePro("192.168.0.10") as scope:
+# Connect to oscilloscope (default: LXI, optional: protocol="vicp")
+with WavePro("192.168.0.10", protocol="lxi") as scope:
     # Configure channels
     channels = {
         1: ChannelConfig(vdiv=0.2, offset=0.0, enabled=True),
@@ -192,6 +192,10 @@ with WavePro("192.168.0.10") as scope:
     ...
 ```
 
+Transport selection:
+- `protocol="lxi"` (default): `TCPIP0::<ip>::inst0::INSTR`
+- `protocol="vicp"`: `VICP::<ip>::INSTR`
+
 #### Configuration
 
 ```python
@@ -240,6 +244,7 @@ Run examples:
 
 ```bash
 python -m examples.01_connect.connect --address 192.168.0.10
+python -m examples.01_connect.connect --address 192.168.0.10 --protocol vicp
 python -m examples.02_manual_settings.manual_settings --config settings.json
 python -m examples.03_single_capture.single_capture --outdir ./captures
 python -m examples.04_sequence_capture.sequence_capture --segments 100
