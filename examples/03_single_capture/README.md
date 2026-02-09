@@ -6,6 +6,7 @@ Capture a single waveform from the oscilloscope and save it as a PNG plot.
 
 - Python 3.10+
 - pyVISA with appropriate backend
+- PyVICP (`pyvicp`) if using `--protocol vicp`
 - numpy, matplotlib
 - Network access to the oscilloscope
 - Signal source connected to CH1 and/or CH2
@@ -23,6 +24,9 @@ python single_capture.py --force
 
 # Specify model, address, and output directory
 python single_capture.py --model waverunner --address 192.168.1.100 --outdir ./captures
+
+# Use VICP transport
+python single_capture.py --protocol vicp --outdir ./captures
 ```
 
 ## Command Line Options
@@ -31,6 +35,7 @@ python single_capture.py --model waverunner --address 192.168.1.100 --outdir ./c
 |--------|---------|-------------|
 | `--model` | `wavepro` | Oscilloscope model (`wavepro` or `waverunner`) |
 | `--address` | `192.168.0.10` | IP address of the oscilloscope |
+| `--protocol` | `lxi` | Transport protocol (`lxi` or `vicp`) |
 | `--outdir` | `.` | Output directory for output files |
 | `--channels` | all enabled | Specific channels to capture (e.g., `--channels 1 2`) |
 | `--config` | `None` | Path to JSON settings file to apply (omit to read from scope) |
@@ -68,7 +73,8 @@ After running:
 
 ## Notes
 
-- This example does not change scope settings. Configure the scope first (see `examples/02_manual_settings`).
+- If `--config` is omitted, current scope settings are saved to `settings.json`.
+- The script forces `trigger.mode=SINGLE` and disables sequence mode for this run.
 
 ## Output Files
 

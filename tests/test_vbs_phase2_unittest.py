@@ -107,7 +107,9 @@ class RunStateTests(unittest.TestCase):
 
         scope.set_run_state("RUN", timeout=0.5)
 
-        self.assertTrue(any("RunState = \"Run\"" in c for c in scope.commands))
+        self.assertTrue(
+            any(("RunState = \"Run\"" in c) or c.startswith("TRMD NORM") for c in scope.commands)
+        )
 
 
 class VbsLoggingTests(unittest.TestCase):

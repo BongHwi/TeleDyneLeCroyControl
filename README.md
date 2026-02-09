@@ -1,6 +1,6 @@
 # Teledyne LeCroy Oscilloscope Library
 
-Python library for controlling Teledyne LeCroy oscilloscopes via VISA/TCP.
+Python library for controlling Teledyne LeCroy oscilloscopes via VISA/TCP (LXI or VICP).
 
 **Supported Models:** WavePro, WaveRunner series
 
@@ -11,8 +11,12 @@ Python library for controlling Teledyne LeCroy oscilloscopes via VISA/TCP.
 ### Dependencies
 
 ```bash
-pip install pyvisa pyvisa-py numpy matplotlib
+pip install pyvisa pyvisa-py pyvicp numpy matplotlib
 ```
+
+Transport/runtime notes:
+- `pyvisa-py`: LXI/TCP backend
+- `pyvicp` (PyVICP): required when using `protocol="vicp"`
 
 For NI-VISA backend (recommended for production):
 - Install [NI-VISA](https://www.ni.com/en/support/downloads/drivers/download.ni-visa.html)
@@ -21,7 +25,7 @@ For NI-VISA backend (recommended for production):
 
 ```bash
 git clone <this-repo>
-cd scope
+cd TeleDyneLeCroyControl
 ```
 
 ## Quick Start
@@ -89,7 +93,7 @@ Both classes share the same API. Use the one matching your hardware.
 ChannelConfig(
     vdiv: float = 0.020,           # V/div
     offset: float = 0.0,           # V
-    coupling: Coupling = Coupling.DC50,  # DC50, DC1M, AC1M
+    coupling: Coupling = Coupling.DC50,  # DC50, DC1M, AC1M, GND
     enabled: bool = True,
 )
 ```
@@ -111,6 +115,7 @@ AcquisitionConfig(
 TriggerConfig(
     channels: dict[int, ChannelTrigger] = {},
     mode: Literal["AUTO", "NORM", "SINGLE", "STOP"] = "SINGLE",
+    logic: Literal["OR", "AND"] = "OR",
     external: bool = False,
     external_level: float = 1.25,
 )
@@ -186,6 +191,7 @@ TriggerSlope.EITHER   # Either edge
 Coupling.DC50  # 50Ω DC coupling
 Coupling.DC1M  # 1MΩ DC coupling
 Coupling.AC1M  # 1MΩ AC coupling
+Coupling.GND   # Ground coupling
 ```
 
 ### Exceptions
@@ -253,7 +259,7 @@ See the `examples/` directory:
 
 | Example | Description |
 |---------|-------------|
-| `01_connect` | Basic connection and identity query |
+| `01_connect` | Basic connection and identity query (LXI/VICP) |
 | `02_manual_settings` | Configure scope from JSON file |
 | `03_single_capture` | Single waveform capture with plotting |
 | `04_sequence_capture` | Sequence mode multi-segment capture |

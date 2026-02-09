@@ -6,6 +6,7 @@ Configure oscilloscope channel, acquisition, and trigger settings from a JSON fi
 
 - Python 3.10+
 - pyVISA with appropriate backend
+- PyVICP (`pyvicp`) if using `--protocol vicp`
 - Network access to the oscilloscope
 
 ## Configuration File
@@ -22,7 +23,9 @@ Edit `settings.json` to customize the oscilloscope configuration:
     "tdiv": 1e-3,
     "sampling_period": 1e-6,
     "trigger_delay": 0.0,
-    "window_delay": 10e-9
+    "window_delay": 10e-9,
+    "memory_size": 10000,
+    "sample_rate": 1000000.0
   },
   "trigger": {
     "channels": {
@@ -30,8 +33,14 @@ Edit `settings.json` to customize the oscilloscope configuration:
       "2": { "state": "LOW", "level": -0.05 }
     },
     "mode": "SINGLE",
+    "logic": "OR",
     "external": false,
     "external_level": 1.25
+  },
+  "instrument": {
+    "display": "OFF",
+    "grid": "QUATTRO",
+    "bandwidth_limit": "OFF"
   },
   "sequence": {
     "enabled": false,
@@ -66,6 +75,8 @@ Edit `settings.json` to customize the oscilloscope configuration:
 | `acquisition.sampling_period` | Sample interval (s) |
 | `acquisition.trigger_delay` | Trigger delay time (s) |
 | `acquisition.window_delay` | Window delay time (s) |
+| `acquisition.memory_size` | Acquisition memory size (points, optional) |
+| `acquisition.sample_rate` | Sample rate (Hz, optional) |
 
 ### Trigger Settings
 
@@ -75,6 +86,7 @@ Edit `settings.json` to customize the oscilloscope configuration:
 | `trigger.channels.<n>.level` | Absolute trigger level (V) |
 | `trigger.channels.<n>.level_offset` | Relative to baseline (V), used if `level` is not set |
 | `trigger.mode` | `SINGLE`, `NORM`, or `AUTO` |
+| `trigger.logic` | Pattern logic: `OR` or `AND` |
 | `trigger.external` | Enable external trigger input (bool) |
 | `trigger.external_level` | External trigger level (V) |
 
@@ -97,6 +109,14 @@ When `external` is `true`, the scope will use the external trigger input (EX) in
 
 **Sequence Mode:**
 When enabled, the oscilloscope captures multiple waveform segments in a single acquisition. Each segment is triggered independently and stored separately. This is useful for capturing rare events or analyzing signal variations over time.
+
+### Instrument Settings
+
+| Field | Description |
+|-------|-------------|
+| `instrument.display` | Scope display: `ON` or `OFF` |
+| `instrument.grid` | Grid mode (example: `QUATTRO`) |
+| `instrument.bandwidth_limit` | Bandwidth limit: `ON` or `OFF` |
 
 ### Auxiliary Output Settings
 
@@ -130,6 +150,9 @@ python manual_settings.py --output my_settings.json
 
 # Specify model and address
 python manual_settings.py --model waverunner --address 192.168.1.100
+
+# Use VICP transport
+python manual_settings.py --protocol vicp
 ```
 
 ### Apply Settings from File (Apply Mode)
@@ -145,6 +168,9 @@ python manual_settings.py --config my_settings.json
 
 # Partial config - only apply trigger settings
 python manual_settings.py --config trigger_only.json
+
+# Apply settings over VICP transport
+python manual_settings.py --protocol vicp --config settings.json
 ```
 
 ### Partial Configuration Files
@@ -180,7 +206,7 @@ Settings saved to: settings.json
 
 ```
 Loading settings from: settings.json
-Applying sections: channels, acquisition, trigger, sequence, auxiliary_output
+Applying sections: instrument, channels, acquisition, trigger, sequence, auxiliary_output
 Settings applied. Verify changes on the scope front panel.
 ```
 

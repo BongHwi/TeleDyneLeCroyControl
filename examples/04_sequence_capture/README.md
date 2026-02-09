@@ -13,6 +13,7 @@ Sequence mode captures multiple triggered events in rapid succession, storing ea
 
 - Python 3.10+
 - pyVISA with appropriate backend
+- PyVICP (`pyvicp`) if using `--protocol vicp`
 - numpy, matplotlib
 - Network access to the oscilloscope
 - Signal source connected to CH1 and/or CH2
@@ -34,6 +35,9 @@ python sequence_capture.py \
     --address 192.168.1.100 \
     --segments 50 \
     --outdir ./sequences
+
+# Use VICP transport
+python sequence_capture.py --protocol vicp --segments 50
 ```
 
 ## Command Line Options
@@ -42,11 +46,13 @@ python sequence_capture.py \
 |--------|---------|-------------|
 | `--model` | `wavepro` | Oscilloscope model (`wavepro` or `waverunner`) |
 | `--address` | `192.168.0.10` | IP address of the oscilloscope |
+| `--protocol` | `lxi` | Transport protocol (`lxi` or `vicp`) |
 | `--segments` | `100` | Number of segments to capture |
 | `--outdir` | `.` | Output directory for output files |
 | `--channels` | all enabled | Specific channels to capture (e.g., `--channels 1 2`) |
 | `--config` | `None` | Path to JSON settings file to apply (omit to read from scope) |
 | `--force` | off | Use force trigger for testing without real signals |
+| `--wait-timeout` | auto | Trigger wait timeout in seconds (default: `settings.sequence.timeout_seconds`) |
 
 ## Expected Output
 
@@ -80,6 +86,8 @@ After running:
 3. As triggers occur, the segment counter increments
 4. When all segments are captured, acquisition stops
 5. The scope displays the last captured segment
+
+The script forces `trigger.mode=NORM` and enables sequence mode with `--segments`.
 
 ## Output Files
 

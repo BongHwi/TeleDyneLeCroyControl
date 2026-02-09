@@ -84,7 +84,7 @@ def apply_settings(scope, config_path: Path) -> None:
 
     # Show which sections will be applied
     sections = [k for k in settings.keys() if k in (
-        "channels", "acquisition", "trigger", "sequence", "auxiliary_output"
+        "instrument", "channels", "acquisition", "trigger", "sequence", "auxiliary_output"
     )]
     print(f"Applying sections: {', '.join(sections)}")
 

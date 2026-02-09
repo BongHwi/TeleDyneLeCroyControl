@@ -81,6 +81,7 @@ class Coupling(Enum):
     DC50 = "D50"   # 50Ω DC
     DC1M = "D1M"   # 1MΩ DC
     AC1M = "A1M"   # 1MΩ AC
+    GND = "GND"   # Ground
 
 
 class AuxOutputMode(Enum):
@@ -95,7 +96,9 @@ SETTINGS_OPTIONS = {
     "coupling": [e.name for e in Coupling],
     "trigger_state": [e.name for e in TriggerState],
     "trigger_mode": ["AUTO", "NORM", "SINGLE", "STOP"],
+    "trigger_logic": ["OR", "AND"],
     "auxiliary_output": [e.name for e in AuxOutputMode],
+    "switch": ["ON", "OFF"],
 }
 
 
@@ -171,6 +174,7 @@ class TriggerConfig:
     """
     channels: dict[int, ChannelTrigger] = field(default_factory=dict)
     mode: Literal["AUTO", "NORM", "SINGLE", "STOP"] = "SINGLE"
+    logic: Literal["OR", "AND"] = "OR"
     external: bool = False         # Use external trigger (EX)
     external_level: float = 1.25   # External trigger level (V)
 
@@ -522,23 +526,16 @@ class TeledyneLecroyScope(ABC):
             seq_settings = self._settings.get("sequence", {})
             configured = seq_settings.get("timeout_seconds") if isinstance(seq_settings, dict) else None
             base = float(configured) if configured is not None else 10.0
+        # RunState transitions should never wait for capture-timeout scale values.
+        base = min(base, 30.0)
         if sequence_operation:
-            return max(5.0, base + 2.0)
+            return max(5.0, min(base + 2.0, 60.0))
         return max(5.0, base)
 
     def _read_run_state(self) -> str:
-        response = self._vbs_query(
-            "app.Acquisition.RunState",
-            operation="trigger_mode_readback",
-            fallback_scpi="TRMD?",
-        )
-        response_text = response.strip()
-        if (
-            "object doesn't support" in response_text.lower()
-            or response_text.lower().startswith("vbs error")
-            or response_text.lower().startswith("error")
-        ):
-            response_text = self.query("TRMD?")
+        # Older firmware can reject app.Acquisition.RunState VBS paths.
+        # TRMD? is the stable cross-model readback.
+        response_text = self.query("TRMD?")
         return self._normalize_run_state(response_text)
 
     def _poll_state_stable(
@@ -576,7 +573,7 @@ class TeledyneLecroyScope(ABC):
         timeout: float | None = None,
         sequence_operation: bool = False,
     ) -> None:
-        """Set run state using VBS write and stable readback polling."""
+        """Set run state using SCPI and stable readback polling."""
         normalized = self._normalize_run_state(target)
         resolved_timeout = self._resolve_state_timeout(
             timeout,
@@ -586,24 +583,12 @@ class TeledyneLecroyScope(ABC):
         for _attempt in range(2):
             try:
                 if target == "STOP":
-                    self._vbs_write(
-                        'app.Acquisition.RunState = "Stop"',
-                        operation="sequence_arm_state_write",
-                    )
+                    self.write("TRMD STOP")
                 elif target == "RUN":
-                    self._vbs_write(
-                        'app.Acquisition.RunState = "Run"',
-                        operation="sequence_arm_state_write",
-                    )
+                    # SCPI has no explicit RUN token; NORM keeps acquisition running.
+                    self.write("TRMD NORM")
                 else:
-                    self._vbs_write(
-                        f'app.Acquisition.TriggerMode = "{target}"',
-                        operation="sequence_arm_state_write",
-                    )
-                    self._vbs_write(
-                        'app.Acquisition.RunState = "Run"',
-                        operation="sequence_arm_state_write",
-                    )
+                    self.write(f"TRMD {target}")
                 if self._poll_state_stable(normalized, timeout=resolved_timeout):
                     return
                 last_error = ScopeTimeoutError(
@@ -904,6 +889,31 @@ class TeledyneLecroyScope(ABC):
         """Read all current settings from scope as a dictionary."""
         self._ensure_connected()
 
+        # Read instrument-level settings
+        instrument = {
+            "display": "OFF",
+            "grid": "QUATTRO",
+            "bandwidth_limit": "OFF",
+        }
+        try:
+            display_response = self.query("DISP?").strip().upper()
+            if "ON" in display_response:
+                instrument["display"] = "ON"
+        except Exception as e:
+            self._logger.debug(f"Could not read display state: {e}")
+        try:
+            grid_response = self.query("GRID?").strip()
+            if grid_response:
+                instrument["grid"] = grid_response.split()[-1].upper()
+        except Exception as e:
+            self._logger.debug(f"Could not read grid mode: {e}")
+        try:
+            bwl_response = self.query("BWL?").strip().upper()
+            if "ON" in bwl_response:
+                instrument["bandwidth_limit"] = "ON"
+        except Exception as e:
+            self._logger.debug(f"Could not read bandwidth limit: {e}")
+
         # Read ALL channel settings (not just enabled)
         channels = {}
         for ch in range(1, self.MAX_CHANNELS + 1):
@@ -933,6 +943,12 @@ class TeledyneLecroyScope(ABC):
                     "coupling": coupling_str,
                     "enabled": config.enabled,
                 }
+                try:
+                    channels[str(ch)]["attenuation"] = self._parse_numeric_response(
+                        self.query(f"C{ch}:ATTN?")
+                    )
+                except Exception as e:
+                    self._logger.debug(f"Could not read attenuation for channel {ch}: {e}")
             except Exception as e:
                 self._logger.debug(f"Could not read channel {ch}: {e}")
 
@@ -961,17 +977,58 @@ class TeledyneLecroyScope(ABC):
             "trigger_delay": trigger_delay,
             "window_delay": window_delay,
         }
+        try:
+            memory_response = self.query("MSIZ?")
+            acquisition["memory_size"] = int(self._parse_numeric_response(memory_response))
+        except Exception as e:
+            self._logger.debug(f"Could not read memory size: {e}")
+        try:
+            sample_rate_response = self.query(
+                r"""vbs? 'return=app.Acquisition.Horizontal.SampleRate' """
+            )
+            acquisition["sample_rate"] = self._parse_numeric_response(sample_rate_response)
+        except Exception as e:
+            self._logger.debug(f"Could not read sample rate: {e}")
 
-        # Read trigger mode
-        trigger_response = self.query("TRMD?").strip()
-        trigger_mode = trigger_response.split()[-1] if trigger_response else "SINGLE"
+        # Read trigger mode (prefer VBS TriggerMode, fallback to TRMD?)
+        trigger_mode = "SINGLE"
+        try:
+            trigger_response = self.query(
+                r"""vbs? 'return=app.Acquisition.TriggerMode' """
+            ).strip().strip('"')
+            trig_u = trigger_response.upper()
+            if "AUTO" in trig_u:
+                trigger_mode = "AUTO"
+            elif "NORM" in trig_u:
+                trigger_mode = "NORM"
+            elif "SINGLE" in trig_u:
+                trigger_mode = "SINGLE"
+            elif "STOP" in trig_u:
+                trigger_mode = "STOP"
+            elif trigger_response:
+                trigger_mode = trigger_response.split()[-1].upper()
+        except Exception:
+            trigger_response = self.query("TRMD?").strip()
+            trigger_mode = trigger_response.split()[-1].upper() if trigger_response else "SINGLE"
 
         # Read trigger pattern states
+        trpa_response = ""
         try:
+            trpa_response = self.query("TRPA?")
             pattern_states = self.read_trigger_pattern()
         except Exception as e:
             self._logger.debug(f"Could not read trigger pattern: {e}")
             pattern_states = {}
+
+        trigger_logic = "OR"
+        try:
+            parts = [part.strip().upper() for part in trpa_response.split(",") if part.strip()]
+            if "STATE" in parts:
+                idx = parts.index("STATE")
+                if idx + 1 < len(parts) and parts[idx + 1] in ("OR", "AND"):
+                    trigger_logic = parts[idx + 1]
+        except Exception as e:
+            self._logger.debug(f"Could not parse trigger logic: {e}")
 
         # Build per-channel trigger config
         trigger_channels = {}
@@ -1008,6 +1065,7 @@ class TeledyneLecroyScope(ABC):
         trigger = {
             "channels": trigger_channels,
             "mode": trigger_mode,
+            "logic": trigger_logic,
             "external": external,
             "external_level": external_level,
         }
@@ -1024,7 +1082,14 @@ class TeledyneLecroyScope(ABC):
             # Parse response like "SEQ ON,100,2.5E+6" or "SEQ OFF"
             if "ON" in seq_response:
                 sequence["enabled"] = True
-                parts = seq_response.replace("SEQ", "").replace("ON", "").strip().split(",")
+                payload = seq_response
+                if payload.upper().startswith("SEQ"):
+                    payload = payload[3:].strip()
+                if payload.upper().startswith("ON"):
+                    payload = payload[2:].strip()
+                if payload.startswith(","):
+                    payload = payload[1:].strip()
+                parts = [p.strip() for p in payload.split(",") if p.strip()]
                 if len(parts) >= 1:
                     try:
                         sequence["num_segments"] = int(parts[0].strip())
@@ -1041,7 +1106,12 @@ class TeledyneLecroyScope(ABC):
                 timeout_response = self.query(
                     r"""vbs? 'return=app.Acquisition.Horizontal.SequenceTimeoutEnable' """
                 )
-                sequence["timeout_enabled"] = "-1" in timeout_response or "TRUE" in timeout_response.upper()
+                timeout_value = timeout_response.strip().strip('"').upper()
+                sequence["timeout_enabled"] = (
+                    "-1" in timeout_value
+                    or timeout_value in {"1", "TRUE", "ON"}
+                    or "TRUE" in timeout_value
+                )
             except Exception:
                 pass
         except Exception as e:
@@ -1050,19 +1120,26 @@ class TeledyneLecroyScope(ABC):
         # Read auxiliary output mode
         auxiliary_output = "TRIGGER_OUT"  # default
         try:
-            aux_response = self.query(
-                r"""vbs? 'return=app.Acquisition.AuxOutput.Mode' """
-            ).strip()
+            try:
+                aux_response = self.query(
+                    r"""vbs? 'return=app.Acquisition.AuxOutput.AuxMode' """
+                ).strip()
+            except Exception:
+                aux_response = self.query(
+                    r"""vbs? 'return=app.Acquisition.AuxOutput.Mode' """
+                ).strip()
             # Parse response and map to AuxOutputMode enum names
-            if "TriggerEnabled" in aux_response:
+            aux_norm = aux_response.strip().strip('"').upper()
+            if "TRIGGERENABLED" in aux_norm or aux_norm in {"1", "TRUE", "ON"}:
                 auxiliary_output = "TRIGGER_ENABLED"
-            elif "TriggerOut" in aux_response:
+            elif "TRIGGEROUT" in aux_norm or aux_norm in {"0", "FALSE", "OFF"}:
                 auxiliary_output = "TRIGGER_OUT"
         except Exception as e:
             self._logger.debug(f"Could not read auxiliary output: {e}")
 
         return {
             "_options": SETTINGS_OPTIONS,
+            "instrument": instrument,
             "channels": channels,
             "acquisition": acquisition,
             "trigger": trigger,
@@ -1103,25 +1180,57 @@ class TeledyneLecroyScope(ABC):
         if "channels" in settings:
             channels = {}
             for ch_str, ch_data in settings["channels"].items():
-                if ch_data.get("enabled", False):
-                    coupling = Coupling[ch_data.get("coupling", "DC50")]
-                    channels[int(ch_str)] = ChannelConfig(
-                        vdiv=ch_data.get("vdiv", 0.02),
-                        offset=ch_data.get("offset", 0.0),
-                        coupling=coupling,
-                        enabled=True,
+                ch_num = int(ch_str)
+                try:
+                    current_cfg = self.read_channel_config(ch_num)
+                except Exception:
+                    current_cfg = ChannelConfig()
+
+                coupling_default = "DC50"
+                try:
+                    coupling_response = self.query(f"C{ch_num}:CPL?").strip()
+                    coupling_value = coupling_response.split()[-1]
+                    coupling_default = {
+                        "D50": "DC50",
+                        "D1M": "DC1M",
+                        "A1M": "AC1M",
+                        "GND": "GND",
+                    }.get(coupling_value, "DC50")
+                except Exception:
+                    pass
+
+                coupling_name = str(ch_data.get("coupling", "DC50")).upper()
+                if coupling_name not in Coupling.__members__:
+                    self._logger.warning(
+                        f"Unknown coupling '{coupling_name}' for channel {ch_str}; using DC50"
                     )
+                    coupling_name = "DC50"
+                if "coupling" not in ch_data:
+                    coupling_name = coupling_default
+                coupling = Coupling[coupling_name]
+                channels[ch_num] = ChannelConfig(
+                    vdiv=ch_data.get("vdiv", current_cfg.vdiv),
+                    offset=ch_data.get("offset", current_cfg.offset),
+                    coupling=coupling,
+                    enabled=bool(ch_data.get("enabled", current_cfg.enabled)),
+                )
 
         # Build acquisition config only if "acquisition" section is present
         acquisition: AcquisitionConfig | None = None
         if "acquisition" in settings:
             acq_data = settings["acquisition"]
-            acquisition = AcquisitionConfig(
-                tdiv=acq_data.get("tdiv", 5e-9),
-                sampling_period=acq_data.get("sampling_period", 25e-12),
-                trigger_delay=acq_data.get("trigger_delay", 0.0),
-                window_delay=acq_data.get("window_delay", 10e-9),
-            )
+            typed_keys = {"tdiv", "sampling_period", "trigger_delay", "window_delay"}
+            if any(k in acq_data for k in typed_keys):
+                try:
+                    current_acq = self.read_acquisition_config()
+                except Exception:
+                    current_acq = AcquisitionConfig()
+                acquisition = AcquisitionConfig(
+                    tdiv=acq_data.get("tdiv", current_acq.tdiv),
+                    sampling_period=acq_data.get("sampling_period", current_acq.sampling_period),
+                    trigger_delay=acq_data.get("trigger_delay", current_acq.trigger_delay),
+                    window_delay=acq_data.get("window_delay", current_acq.window_delay),
+                )
 
         # Build sequence config only if "sequence" section is present
         sequence: SequenceConfig | None = None
@@ -1141,11 +1250,25 @@ class TeledyneLecroyScope(ABC):
                 acquisition=acquisition,
                 sequence=sequence,
             )
+        if "acquisition" in settings:
+            acq_data = settings["acquisition"]
+            if "memory_size" in acq_data:
+                self.write(f"MSIZ {int(acq_data['memory_size'])}")
+            if "sample_rate" in acq_data:
+                self.write(
+                    fr"""vbs 'app.Acquisition.Horizontal.SampleRate = {float(acq_data['sample_rate'])}' """
+                )
 
         # Apply trigger settings if present
         if "trigger" in settings:
             trigger_data = settings["trigger"]
+            current_trigger = self._settings.get("trigger", {}) if isinstance(self._settings, dict) else {}
             trigger_channels: dict[int, ChannelTrigger] = {}
+            current_logic = str(current_trigger.get("logic", "OR")).upper()
+            logic = str(trigger_data.get("logic", current_logic)).upper()
+            if logic not in ("OR", "AND"):
+                self._logger.warning(f"Unknown trigger logic '{logic}'; using OR")
+                logic = "OR"
             for ch_str, tr_data in trigger_data.get("channels", {}).items():
                 state = TriggerState[tr_data.get("state", "DONT_CARE")]
                 trigger_channels[int(ch_str)] = ChannelTrigger(
@@ -1155,9 +1278,10 @@ class TeledyneLecroyScope(ABC):
 
             trigger_config = TriggerConfig(
                 channels=trigger_channels,
-                mode=trigger_data.get("mode", "SINGLE"),
-                external=trigger_data.get("external", False),
-                external_level=trigger_data.get("external_level", 1.25),
+                mode=str(trigger_data.get("mode", current_trigger.get("mode", "NORM"))).upper(),
+                logic=logic,
+                external=bool(trigger_data.get("external", current_trigger.get("external", False))),
+                external_level=float(trigger_data.get("external_level", current_trigger.get("external_level", 1.25))),
             )
             self.set_trigger(trigger_config)
 
@@ -1165,6 +1289,24 @@ class TeledyneLecroyScope(ABC):
         if "auxiliary_output" in settings:
             aux_mode = AuxOutputMode[settings["auxiliary_output"]]
             self.set_auxiliary_output(aux_mode)
+
+        # Apply instrument-level settings if present
+        if "instrument" in settings:
+            instrument_data = settings["instrument"]
+            if "display" in instrument_data:
+                display_value = str(instrument_data["display"]).upper()
+                self.write(f"DISP {'ON' if display_value in ('ON', 'TRUE', '1') else 'OFF'}")
+            if "grid" in instrument_data:
+                self.write(f"GRID {str(instrument_data['grid']).upper()}")
+            if "bandwidth_limit" in instrument_data:
+                bwl_value = str(instrument_data["bandwidth_limit"]).upper()
+                self.write(f"BWL {'ON' if bwl_value in ('ON', 'TRUE', '1') else 'OFF'}")
+
+        # Apply per-channel attenuation if provided
+        if "channels" in settings:
+            for ch_str, ch_data in settings["channels"].items():
+                if "attenuation" in ch_data:
+                    self.write(f"C{int(ch_str)}:ATTN {float(ch_data['attenuation'])}")
 
         self._logger.info("Settings applied from dictionary")
 
@@ -1226,7 +1368,7 @@ class TeledyneLecroyScope(ABC):
             channels = {ch: 0.0 for ch in self._active_channels}
 
         for ch, offset in channels.items():
-            self.write(f"C{ch}:OFFSET {-offset}")
+            self.write(f"C{ch}:OFST {offset}")
             self._logger.debug(f"Channel {ch} offset: {offset}V")
 
         return channels
@@ -1237,7 +1379,11 @@ class TeledyneLecroyScope(ABC):
         Args:
             mode: AuxOutputMode.TRIGGER_OUT or AuxOutputMode.TRIGGER_ENABLED
         """
-        self.write(f"""vbs 'app.Acquisition.AuxOutput.Mode = "{mode.value}"' """)
+        try:
+            self.write(f"""vbs 'app.Acquisition.AuxOutput.AuxMode = "{mode.value}"' """)
+        except Exception:
+            # Backward-compatible fallback for models exposing legacy Mode only.
+            self.write(f"""vbs 'app.Acquisition.AuxOutput.Mode = "{mode.value}"' """)
         self._logger.info(f"Auxiliary output: {mode.value}")
 
         # Update settings state
@@ -1302,6 +1448,7 @@ class TeledyneLecroyScope(ABC):
         self._trigger_config = config
         self._setup_trigger_source(config)
         self._setup_trigger_level(config)
+        self.set_trigger_mode(config.mode)
 
         # Log trigger configuration
         active = [f"CH{ch}:{t.state.name}" for ch, t in config.channels.items()
@@ -1325,6 +1472,7 @@ class TeledyneLecroyScope(ABC):
         self._settings["trigger"] = {
             "channels": trigger_channels,
             "mode": config.mode,
+            "logic": config.logic,
             "external": config.external,
             "external_level": config.external_level,
         }
@@ -1586,7 +1734,7 @@ class WavePro(TeledyneLecroyScope):
 
         self.write(f"MSIZ {memory_size}")
         self._vbs_write(
-            f"app.Acquisition.Horizontal.Scale = {config.tdiv}",
+            f"app.Acquisition.Horizontal.HorScale = {config.tdiv}",
             operation="acquisition_horizontal_scale",
             fallback_scpi=f"TDIV {config.tdiv}",
         )
@@ -1641,10 +1789,13 @@ class WavePro(TeledyneLecroyScope):
             fallback_scpi=f"{ch}:VDIV {config.vdiv}",
         )
         self._vbs_write(
-            f"app.Acquisition.C{channel}.Offset = {-config.offset}",
+            f"app.Acquisition.C{channel}.VerOffset = {config.offset}",
             operation="channel_offset",
-            fallback_scpi=f"{ch}:OFFSET {-config.offset}",
+            fallback_scpi=f"{ch}:OFST {config.offset}",
         )
+        # Some firmware accepts VBS write but does not actually update offset.
+        # Force SCPI write to guarantee readback consistency.
+        self.write(f"{ch}:OFST {config.offset}")
         self._vbs_write(
             f'app.Acquisition.C{channel}.Coupling = "{config.coupling.value}"',
             operation="channel_coupling",
@@ -1676,6 +1827,12 @@ class WavePro(TeledyneLecroyScope):
                 operation="acquisition_sequence_timeout",
                 fallback_scpi=f"SEQ ON,{config.num_segments},{config.timeout_seconds}",
             )
+        else:
+            self._vbs_write(
+                "app.Acquisition.Horizontal.SequenceTimeoutEnable = 0",
+                operation="acquisition_sequence_timeout",
+                fallback_scpi=None,
+            )
 
     def _get_trigger_channels(self, config: TriggerConfig) -> dict[int, ChannelTrigger]:
         """Get channel trigger settings."""
@@ -1693,28 +1850,33 @@ class WavePro(TeledyneLecroyScope):
         # External trigger state
         ext_state = "H" if config.external else "X"
 
+        state_map = {"H": "High", "L": "Low", "X": "DontCare"}
+        ext_state_map = {"H": "High", "X": "DontCare"}
+        logic_map = {"OR": "Or", "AND": "And"}
+        logic_value = logic_map.get(config.logic.upper(), "Or")
+
         self._vbs_write(
-            f'app.Acquisition.Trigger.Pattern.C1 = "{states[0]}"',
+            f'app.Acquisition.Trigger.Pattern.C1LogicState = "{state_map.get(states[0], "DontCare")}"',
             operation="trigger_pattern_write",
         )
         self._vbs_write(
-            f'app.Acquisition.Trigger.Pattern.C2 = "{states[1]}"',
+            f'app.Acquisition.Trigger.Pattern.C2LogicState = "{state_map.get(states[1], "DontCare")}"',
             operation="trigger_pattern_write",
         )
         self._vbs_write(
-            f'app.Acquisition.Trigger.Pattern.C3 = "{states[2]}"',
+            f'app.Acquisition.Trigger.Pattern.C3LogicState = "{state_map.get(states[2], "DontCare")}"',
             operation="trigger_pattern_write",
         )
         self._vbs_write(
-            f'app.Acquisition.Trigger.Pattern.C4 = "{states[3]}"',
+            f'app.Acquisition.Trigger.Pattern.C4LogicState = "{state_map.get(states[3], "DontCare")}"',
             operation="trigger_pattern_write",
         )
         self._vbs_write(
-            f'app.Acquisition.Trigger.Pattern.EX = "{ext_state}"',
+            f'app.Acquisition.Trigger.Pattern.ExtLogicState = "{ext_state_map.get(ext_state, "DontCare")}"',
             operation="trigger_pattern_write",
         )
         self._vbs_write(
-            'app.Acquisition.Trigger.Pattern.Logic = "OR"',
+            f'app.Acquisition.Trigger.Pattern.LogicOperator = "{logic_value}"',
             operation="trigger_pattern_write",
         )
 
