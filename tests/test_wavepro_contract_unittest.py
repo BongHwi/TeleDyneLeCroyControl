@@ -17,12 +17,20 @@ import teledyne_lecroy_core.scope as core_scope
 
 
 class _FakeTransport:
-    def __init__(self, malformed_block: bool = False) -> None:
+    def __init__(
+        self,
+        malformed_block: bool = False,
+        *,
+        payload_points: int = 100,
+        wavedesc_points: int = 100,
+    ) -> None:
         self.timeout = 30000
         self.last_write = ""
         self.writes: list[str] = []
         self.trigger_mode = "STOP"
         self.malformed_block = malformed_block
+        self.payload_points = payload_points
+        self.wavedesc_points = wavedesc_points
 
     def write(self, command: str) -> None:
         self.last_write = command.strip()
@@ -70,7 +78,7 @@ class _FakeTransport:
             return "C1:OFFSET 0 V"
         if "INSPECT? 'WAVEDESC'" in cmd:
             return "\n".join([
-                "WAVE_ARRAY_COUNT : 100",
+                f"WAVE_ARRAY_COUNT : {self.wavedesc_points}",
                 "COMM_TYPE : BYTE",
                 "COMM_ORDER : LOFIRST",
             ])
@@ -95,8 +103,10 @@ class _FakeTransport:
     def read_raw(self) -> bytes:
         if self.malformed_block:
             return b"BROKEN"
-        payload = bytes((i % 128 for i in range(100)))
-        return b"#3100" + payload + b"\n"
+        payload = bytes((i % 128 for i in range(self.payload_points)))
+        payload_len = len(payload)
+        block = f"#3{payload_len:03d}".encode("ascii") + payload
+        return block + b"\n"
 
     def clear(self) -> None:
         return None
@@ -173,6 +183,22 @@ class WaveProContractTests(unittest.TestCase):
 
         with self.assertRaises(ScopeConfigurationError):
             scope.readout(channels=[1])
+
+    def test_sequence_readout_tolerates_payload_point_mismatch(self) -> None:
+        scope = WavePro("127.0.0.1", protocol="lxi")
+        scope._scope = _FakeTransport(payload_points=120, wavedesc_points=100)
+        scope._connected = True
+
+        scope.configure(
+            channels={1: ChannelConfig(vdiv=0.2, offset=0.0, enabled=True)},
+            acquisition=AcquisitionConfig(tdiv=1e-3, sampling_period=1e-4),
+            sequence=SequenceConfig(enabled=True, num_segments=1),
+        )
+
+        data = scope.readout_sequence(channels=[1])
+        self.assertIn(1, data)
+        self.assertEqual(len(data[1]), 1)
+        self.assertEqual(data[1][0].points, 120)
 
     def test_waverunner_import_and_instantiation_contract(self) -> None:
         scope = WaveRunner("127.0.0.1", protocol="lxi")

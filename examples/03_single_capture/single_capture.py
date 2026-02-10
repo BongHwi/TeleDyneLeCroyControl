@@ -93,6 +93,12 @@ def parse_args():
         action="store_true",
         help="Use force trigger for testing without real signals",
     )
+    p.add_argument(
+        "--trigger-timeout",
+        type=float,
+        default=60.0,
+        help="Trigger wait timeout in seconds (default: 60.0)",
+    )
     return p.parse_args()
 
 
@@ -134,15 +140,15 @@ def main() -> None:
             print(f"Capturing channels: {channels}")
             print("Arming for single capture...")
 
-            # Force SINGLE mode - triggers once then stops (TRMD? returns "STOP")
-            # This ensures is_triggered() works regardless of settings.json trigger.mode
-            scope.set_trigger_mode("SINGLE")
+            # Force SINGLE mode at trigger-config level so arm() does not revert
+            # to mode from settings.json (for example NORM).
+            scope.apply_settings({"trigger": {"mode": "SINGLE"}})
 
             with timed("arm"):
                 scope.arm()
 
             with timed("wait_for_trigger"):
-                scope.wait_for_trigger(timeout=10.0, force=args.force)
+                scope.wait_for_trigger(timeout=args.trigger_timeout, force=args.force)
             print("Triggered.")
 
             with timed("readout"):

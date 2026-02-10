@@ -572,8 +572,20 @@ class TeledyneLecroyScope(ABC):
         *,
         timeout: float | None = None,
         sequence_operation: bool = False,
+        verify_transition: bool = True,
     ) -> None:
         """Set run state using SCPI and stable readback polling."""
+        if target == "STOP":
+            self.write("TRMD STOP")
+        elif target == "RUN":
+            # SCPI has no explicit RUN token; NORM keeps acquisition running.
+            self.write("TRMD NORM")
+        else:
+            self.write(f"TRMD {target}")
+
+        if not verify_transition:
+            return
+
         normalized = self._normalize_run_state(target)
         resolved_timeout = self._resolve_state_timeout(
             timeout,
@@ -582,13 +594,6 @@ class TeledyneLecroyScope(ABC):
         last_error: Exception | None = None
         for _attempt in range(2):
             try:
-                if target == "STOP":
-                    self.write("TRMD STOP")
-                elif target == "RUN":
-                    # SCPI has no explicit RUN token; NORM keeps acquisition running.
-                    self.write("TRMD NORM")
-                else:
-                    self.write(f"TRMD {target}")
                 if self._poll_state_stable(normalized, timeout=resolved_timeout):
                     return
                 last_error = ScopeTimeoutError(
@@ -1443,12 +1448,19 @@ class TeledyneLecroyScope(ABC):
 
     # === Trigger ===
 
-    def set_trigger(self, config: TriggerConfig) -> None:
+    def set_trigger(
+        self,
+        config: TriggerConfig,
+        *,
+        verify_transition: bool = True,
+        apply_mode: bool = True,
+    ) -> None:
         """Configure trigger settings."""
         self._trigger_config = config
         self._setup_trigger_source(config)
         self._setup_trigger_level(config)
-        self.set_trigger_mode(config.mode)
+        if apply_mode:
+            self.set_trigger_mode(config.mode, verify_transition=verify_transition)
 
         # Log trigger configuration
         active = [f"CH{ch}:{t.state.name}" for ch, t in config.channels.items()
@@ -1479,18 +1491,18 @@ class TeledyneLecroyScope(ABC):
 
         self._save_settings_snapshot("_trigger")
 
-    def arm(self, force: bool = False) -> None:
+    def arm(self, force: bool = False, verify_transition: bool = True) -> None:
         """Arm trigger and wait for acquisition."""
         self._save_settings_snapshot("_capture")
         # Clear previous sweep/waveform data before starting a new acquisition.
         self.write("CLSW")
         if force:
-            self.set_run_state("NORM")
+            self.set_run_state("NORM", verify_transition=verify_transition)
             self.write("FRTR")  # Force trigger
             self._logger.debug("Forced trigger")
         else:
             mode = self._trigger_config.mode if self._trigger_config else "SINGLE"
-            self.set_run_state(mode)
+            self.set_run_state(mode, verify_transition=verify_transition)
             self._logger.debug(f"Armed with mode {mode}, waiting for trigger")
 
     def is_triggered(self) -> bool:
@@ -1541,9 +1553,14 @@ class TeledyneLecroyScope(ABC):
                 raise ScopeTimeoutError(f"Trigger timeout: {timeout}s")
             time.sleep(0.01)
 
-    def set_trigger_mode(self, mode: Literal["AUTO", "NORM", "SINGLE", "STOP"]) -> None:
+    def set_trigger_mode(
+        self,
+        mode: Literal["AUTO", "NORM", "SINGLE", "STOP"],
+        *,
+        verify_transition: bool = True,
+    ) -> None:
         """Set trigger sweep mode."""
-        self.set_run_state(mode)
+        self.set_run_state(mode, verify_transition=verify_transition)
         self._logger.debug(f"Trigger mode: {mode}")
 
         # Update settings state
@@ -2175,7 +2192,10 @@ class WavePro(TeledyneLecroyScope):
                 count=read_count,
                 sample_width_bytes=sample_width,
                 byte_order=byte_order,
-                expected_points=read_count,
+                # Sequence captures can return variable per-segment point counts
+                # depending on scope-side decimation/WFSU behavior, so avoid
+                # strict equality checks here.
+                expected_points=None,
             )
             
             # Adjust dx for this segment
