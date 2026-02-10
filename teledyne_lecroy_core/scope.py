@@ -631,6 +631,21 @@ class TeledyneLecroyScope(ABC):
         self._scope.clear()
         self._logger.info("Scope cleared")
 
+    def clear_sweeps(self) -> None:
+        """Clear all accumulated sweeps and waveform data."""
+        self._ensure_connected()
+        self.write("CLSW")
+        self._logger.info("Sweeps cleared")
+
+    def clear_all_memory(self) -> None:
+        """Clear all internal memory including reference waveforms and zoom traces."""
+        self._ensure_connected()
+        self._vbs_write(
+            "app.Memory.ClearAllMem",
+            operation="memory_clear_all"
+        )
+        self._logger.info("All memory cleared")
+
     @property
     def settings(self) -> dict:
         """Current settings state (read-only copy)."""

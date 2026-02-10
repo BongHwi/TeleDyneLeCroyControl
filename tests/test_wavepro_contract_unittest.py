@@ -204,6 +204,26 @@ class WaveProContractTests(unittest.TestCase):
         scope = WaveRunner("127.0.0.1", protocol="lxi")
         self.assertIsInstance(scope, WaveRunner)
 
+    def test_clear_sweeps_sends_clsw_command(self) -> None:
+        transport = _FakeTransport()
+        scope = WavePro("127.0.0.1", protocol="lxi")
+        scope._scope = transport
+        scope._connected = True
+
+        scope.clear_sweeps()
+        self.assertEqual(transport.last_write, "CLSW")
+
+    def test_clear_all_memory_sends_vbs_command(self) -> None:
+        transport = _FakeTransport()
+        scope = WavePro("127.0.0.1", protocol="lxi")
+        scope._scope = transport
+        scope._connected = True
+
+        scope.clear_all_memory()
+        # VBS command format is: vbs 'expression'
+        self.assertIn("app.Memory.ClearAllMem", transport.last_write)
+        self.assertTrue(transport.last_write.startswith("vbs '"))
+
     def test_settings_roundtrip_includes_extended_sections(self) -> None:
         transport = _FakeTransport()
         scope = WavePro("127.0.0.1", protocol="lxi")
