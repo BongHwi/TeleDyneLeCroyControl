@@ -2167,60 +2167,68 @@ class WavePro(TeledyneLecroyScope):
 
     def _read_sequence_segments(self, channel: int) -> list[WaveformData]:
         """Read all sequence segments."""
-        if not self._sequence_config or not self._acquisition_config:
+        if not self._sequence_config:
             return []
 
-        segments: list[WaveformData] = []
-        
-        # Calculate target points per segment
-        num_points = self._calculate_num_points(self._acquisition_config)
-        
-        # Need to get scaling once
+        # Calculate target points per segment and per channel scaling.
+        acq_config = self._acquisition_config or self.read_acquisition_config()
+        num_points = self._calculate_num_points(acq_config)
+        num_segments = self._sequence_config.num_segments
+        if num_points <= 0 or num_segments <= 0:
+            return []
+
         dx, x0, dy, y0 = self._get_waveform_scaling(channel)
 
-        for seg_idx in range(self._sequence_config.num_segments):
-            # 1. Reset WFSU to see full raw data for this segment
-            self.write(f"C{channel}:WFSU SP,1,NP,0,FP,0,SN,{seg_idx}")
-            
-            # 2. Check actual points for THIS segment
-            inspect = self.query(f"C{channel}:INSPECT? 'WAVEDESC'")
-            actual_points, sample_width, byte_order = self._parse_wavedesc_metadata(inspect)
+        # Configure WFSU once to request all sequence segments in one transfer.
+        self.write(f"C{channel}:WFSU SP,1,NP,0,FP,0,SN,0")
+        inspect = self.query(f"C{channel}:INSPECT? 'WAVEDESC'")
+        actual_points, sample_width, byte_order = self._parse_wavedesc_metadata(inspect)
+        if actual_points <= 0:
+            self._logger.debug(f"CH{channel}: no sequence data available")
+            return []
 
-            # Sequence timeout/partial capture: no more captured segments.
-            if actual_points <= 0:
-                self._logger.debug(
-                    f"CH{channel}: stopping sequence read at segment {seg_idx} (no data)"
-                )
-                break
-            
-            # 3. Calculate SP for THIS segment
-            sparsification = 1
-            if actual_points > 0:
-                sparsification = max(1, int(actual_points / num_points))
-            
-            # 4. Configure WFSU for this segment
-            self.write(f"C{channel}:WFSU SP,{sparsification},NP,{num_points},FP,0,SN,{seg_idx}")
-            
-            read_count = min(num_points, actual_points)
-            raw = self._read_channel_data(
-                channel,
-                count=read_count,
-                sample_width_bytes=sample_width,
-                byte_order=byte_order,
-                # Sequence captures can return variable per-segment point counts
-                # depending on scope-side decimation/WFSU behavior, so avoid
-                # strict equality checks here.
-                expected_points=None,
-            )
-            
-            # Adjust dx for this segment
-            seg_dx = dx
-            if sparsification > 1:
-                seg_dx *= sparsification
+        total_target_points = num_points * num_segments
+        sparsification = max(1, int(actual_points / total_target_points)) if actual_points > 0 else 1
+        self.write(
+            f"C{channel}:WFSU SP,{sparsification},NP,{total_target_points},FP,0,SN,0"
+        )
 
+        raw = self._read_channel_data(
+            channel,
+            count=total_target_points,
+            sample_width_bytes=sample_width,
+            byte_order=byte_order,
+            # Allow partial sequence on timeout; segment split handles this.
+            expected_points=None,
+        )
+
+        bytes_per_segment = num_points * sample_width
+        split_bytes = bytes_per_segment
+        if num_segments > 0:
+            even_split_bytes = len(raw) // num_segments
+            if self._acquisition_config is None:
+                # If acquisition config was not preloaded, infer segment size
+                # from payload and allow a small trailing remainder.
+                if even_split_bytes >= sample_width:
+                    split_bytes = even_split_bytes - (even_split_bytes % sample_width)
+                    if split_bytes < sample_width:
+                        split_bytes = sample_width
+            elif len(raw) % num_segments == 0 and even_split_bytes >= sample_width:
+                split_bytes = even_split_bytes
+
+        full_segments = min(num_segments, len(raw) // split_bytes)
+        if full_segments <= 0:
+            return []
+
+        seg_dx = dx * sparsification
+        segments: list[WaveformData] = []
+        for seg_idx in range(full_segments):
+            start = seg_idx * split_bytes
+            end = start + split_bytes
+            seg_raw = raw[start:end]
             segments.append(
                 WaveformData(
-                    raw_data=raw,
+                    raw_data=seg_raw,
                     channel=channel,
                     segment=seg_idx,
                     dx=seg_dx,
@@ -2229,7 +2237,7 @@ class WavePro(TeledyneLecroyScope):
                     y0=y0,
                     sample_width_bytes=sample_width,
                     byte_order=byte_order,
-                    points=len(raw) // sample_width if sample_width else len(raw),
+                    points=len(seg_raw) // sample_width if sample_width else len(seg_raw),
                 )
             )
 

@@ -200,6 +200,110 @@ class WaveProContractTests(unittest.TestCase):
         self.assertEqual(len(data[1]), 1)
         self.assertEqual(data[1][0].points, 120)
 
+    def test_sequence_readout_fetches_bulk_data_once_and_splits_locally(self) -> None:
+        class _BulkSequenceTransport(_FakeTransport):
+            def __init__(self) -> None:
+                super().__init__(payload_points=300, wavedesc_points=300)
+                self._next_points = 300
+
+            def write(self, command: str) -> None:
+                super().write(command)
+                match = core_scope.re.search(r"WF\? DAT1,NO,\d+,NP,(\d+)", command)
+                if match:
+                    self._next_points = int(match.group(1))
+
+            def read_raw(self) -> bytes:
+                payload = bytes((i % 128 for i in range(self._next_points)))
+                payload_len = len(payload)
+                payload_len_str = str(payload_len)
+                block = (
+                    f"#{len(payload_len_str)}{payload_len_str}".encode("ascii")
+                    + payload
+                )
+                return block + b"\n"
+
+        transport = _BulkSequenceTransport()
+        scope = WavePro("127.0.0.1", protocol="lxi")
+        scope._scope = transport
+        scope._connected = True
+
+        scope.configure(
+            channels={1: ChannelConfig(vdiv=0.2, offset=0.0, enabled=True)},
+            acquisition=AcquisitionConfig(tdiv=1e-3, sampling_period=1e-4),
+            sequence=SequenceConfig(enabled=True, num_segments=3),
+        )
+
+        data = scope.readout_sequence(channels=[1])
+        self.assertIn(1, data)
+        self.assertEqual(len(data[1]), 3)
+        self.assertEqual([seg.points for seg in data[1].segments], [100, 100, 100])
+        wf_reads = [cmd for cmd in transport.writes if "WF? DAT1" in cmd]
+        self.assertEqual(len(wf_reads), 1)
+
+    def test_sequence_readout_works_without_preconfigured_acquisition(self) -> None:
+        class _BulkSequenceTransport(_FakeTransport):
+            def __init__(self) -> None:
+                super().__init__(payload_points=300, wavedesc_points=300)
+                self._next_points = 300
+
+            def write(self, command: str) -> None:
+                super().write(command)
+                match = core_scope.re.search(r"WF\? DAT1,NO,\d+,NP,(\d+)", command)
+                if match:
+                    self._next_points = int(match.group(1))
+
+            def read_raw(self) -> bytes:
+                payload = bytes((i % 128 for i in range(self._next_points)))
+                payload_len = len(payload)
+                payload_len_str = str(payload_len)
+                block = (
+                    f"#{len(payload_len_str)}{payload_len_str}".encode("ascii")
+                    + payload
+                )
+                return block + b"\n"
+
+        scope = WavePro("127.0.0.1", protocol="lxi")
+        scope._scope = _BulkSequenceTransport()
+        scope._connected = True
+        scope._channel_configs = {1: ChannelConfig(vdiv=0.2, offset=0.0, enabled=True)}
+        scope._sequence_config = SequenceConfig(enabled=True, num_segments=3)
+        scope._acquisition_config = None
+
+        data = scope.readout_sequence(channels=[1])
+        self.assertIn(1, data)
+        self.assertEqual(len(data[1]), 3)
+
+    def test_sequence_readout_without_acquisition_splits_even_with_small_remainder(self) -> None:
+        class _RemainderSequenceTransport(_FakeTransport):
+            def __init__(self) -> None:
+                super().__init__(payload_points=2_500_002, wavedesc_points=2_500_002)
+
+            def query(self, command: str) -> str:
+                if command.strip() == "MSIZ?":
+                    return "MSIZ 2500000"
+                return super().query(command)
+
+            def read_raw(self) -> bytes:
+                payload = bytes((i % 128 for i in range(self.payload_points)))
+                payload_len = len(payload)
+                payload_len_str = str(payload_len)
+                block = (
+                    f"#{len(payload_len_str)}{payload_len_str}".encode("ascii")
+                    + payload
+                )
+                return block + b"\n"
+
+        scope = WavePro("127.0.0.1", protocol="lxi")
+        scope._scope = _RemainderSequenceTransport()
+        scope._connected = True
+        scope._channel_configs = {1: ChannelConfig(vdiv=0.2, offset=0.0, enabled=True)}
+        scope._sequence_config = SequenceConfig(enabled=True, num_segments=20)
+        scope._acquisition_config = None
+
+        data = scope.readout_sequence(channels=[1])
+        self.assertIn(1, data)
+        self.assertEqual(len(data[1]), 20)
+
     def test_waverunner_import_and_instantiation_contract(self) -> None:
         scope = WaveRunner("127.0.0.1", protocol="lxi")
         self.assertIsInstance(scope, WaveRunner)
