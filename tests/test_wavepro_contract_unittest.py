@@ -9,8 +9,8 @@ from teledyne_lecroy import (
     SequenceConfig,
     TriggerConfig,
     TriggerState,
-    WavePro,
-    WaveRunner,
+    WP804HD,
+    WR8208HD,
     WaveformData,
 )
 import teledyne_lecroy_core.scope as core_scope
@@ -145,7 +145,7 @@ class WaveProContractTests(unittest.TestCase):
         fake_pyvisa = _FakePyVisa(transport)
 
         with mock.patch.object(core_scope, "pyvisa", fake_pyvisa):
-            scope = WavePro("127.0.0.1", protocol="lxi")
+            scope = WP804HD("127.0.0.1", protocol="lxi")
             scope.connect()
             self.assertTrue(scope._connected)
             self.assertIn("MOCK", scope.query("*IDN?"))
@@ -153,7 +153,7 @@ class WaveProContractTests(unittest.TestCase):
             self.assertFalse(scope._connected)
 
     def test_configure_trigger_readout_contract(self) -> None:
-        scope = WavePro("127.0.0.1", protocol="lxi")
+        scope = WP804HD("127.0.0.1", protocol="lxi")
         scope._scope = _FakeTransport()
         scope._connected = True
 
@@ -175,7 +175,7 @@ class WaveProContractTests(unittest.TestCase):
         self.assertEqual(data[1].points, 100)
 
     def test_malformed_block_raises_scope_configuration_error(self) -> None:
-        scope = WavePro("127.0.0.1", protocol="lxi")
+        scope = WP804HD("127.0.0.1", protocol="lxi")
         scope._scope = _FakeTransport(malformed_block=True)
         scope._connected = True
         scope._acquisition_config = AcquisitionConfig(tdiv=1e-3, sampling_period=1e-4)
@@ -185,7 +185,7 @@ class WaveProContractTests(unittest.TestCase):
             scope.readout(channels=[1])
 
     def test_sequence_readout_tolerates_payload_point_mismatch(self) -> None:
-        scope = WavePro("127.0.0.1", protocol="lxi")
+        scope = WP804HD("127.0.0.1", protocol="lxi")
         scope._scope = _FakeTransport(payload_points=120, wavedesc_points=100)
         scope._connected = True
 
@@ -223,7 +223,7 @@ class WaveProContractTests(unittest.TestCase):
                 return block + b"\n"
 
         transport = _BulkSequenceTransport()
-        scope = WavePro("127.0.0.1", protocol="lxi")
+        scope = WP804HD("127.0.0.1", protocol="lxi")
         scope._scope = transport
         scope._connected = True
 
@@ -262,7 +262,7 @@ class WaveProContractTests(unittest.TestCase):
                 )
                 return block + b"\n"
 
-        scope = WavePro("127.0.0.1", protocol="lxi")
+        scope = WP804HD("127.0.0.1", protocol="lxi")
         scope._scope = _BulkSequenceTransport()
         scope._connected = True
         scope._channel_configs = {1: ChannelConfig(vdiv=0.2, offset=0.0, enabled=True)}
@@ -293,7 +293,7 @@ class WaveProContractTests(unittest.TestCase):
                 )
                 return block + b"\n"
 
-        scope = WavePro("127.0.0.1", protocol="lxi")
+        scope = WP804HD("127.0.0.1", protocol="lxi")
         scope._scope = _RemainderSequenceTransport()
         scope._connected = True
         scope._channel_configs = {1: ChannelConfig(vdiv=0.2, offset=0.0, enabled=True)}
@@ -305,12 +305,40 @@ class WaveProContractTests(unittest.TestCase):
         self.assertEqual(len(data[1]), 20)
 
     def test_waverunner_import_and_instantiation_contract(self) -> None:
-        scope = WaveRunner("127.0.0.1", protocol="lxi")
-        self.assertIsInstance(scope, WaveRunner)
+        scope = WR8208HD("127.0.0.1", protocol="lxi")
+        self.assertIsInstance(scope, WR8208HD)
+
+    def test_waverunner_accepts_eight_active_channels(self) -> None:
+        scope = WR8208HD("127.0.0.1", protocol="lxi", active_channels=list(range(1, 9)))
+        self.assertEqual(scope._active_channels, [1, 2, 3, 4, 5, 6, 7, 8])
+
+    def test_waverunner_trigger_pattern_writes_states_for_channels_five_to_eight(self) -> None:
+        transport = _FakeTransport()
+        scope = WR8208HD("127.0.0.1", protocol="lxi")
+        scope._scope = transport
+        scope._connected = True
+
+        scope.set_trigger(
+            TriggerConfig(
+                channels={
+                    1: ChannelTrigger(state=TriggerState.HIGH, level=0.01),
+                    5: ChannelTrigger(state=TriggerState.LOW, level=0.02),
+                    8: ChannelTrigger(state=TriggerState.HIGH, level=0.03),
+                },
+                mode="SINGLE",
+            )
+        )
+
+        self.assertTrue(
+            any(("TRPA " in cmd and "C5,L" in cmd) for cmd in transport.writes)
+        )
+        self.assertTrue(
+            any(("TRPA " in cmd and "C8,H" in cmd) for cmd in transport.writes)
+        )
 
     def test_clear_sweeps_sends_clsw_command(self) -> None:
         transport = _FakeTransport()
-        scope = WavePro("127.0.0.1", protocol="lxi")
+        scope = WP804HD("127.0.0.1", protocol="lxi")
         scope._scope = transport
         scope._connected = True
 
@@ -319,7 +347,7 @@ class WaveProContractTests(unittest.TestCase):
 
     def test_clear_all_memory_sends_vbs_command(self) -> None:
         transport = _FakeTransport()
-        scope = WavePro("127.0.0.1", protocol="lxi")
+        scope = WP804HD("127.0.0.1", protocol="lxi")
         scope._scope = transport
         scope._connected = True
 
@@ -330,7 +358,7 @@ class WaveProContractTests(unittest.TestCase):
 
     def test_settings_roundtrip_includes_extended_sections(self) -> None:
         transport = _FakeTransport()
-        scope = WavePro("127.0.0.1", protocol="lxi")
+        scope = WP804HD("127.0.0.1", protocol="lxi")
         scope._scope = transport
         scope._connected = True
 
@@ -373,7 +401,7 @@ class WaveProContractTests(unittest.TestCase):
 
         self.assertTrue(
             any(
-                ('Pattern.Logic = "AND"' in cmd) or ('Pattern.LogicOperator = "And"' in cmd)
+                ("TRPA " in cmd and "STATE,AND" in cmd)
                 for cmd in transport.writes
             )
         )
@@ -395,7 +423,7 @@ class WaveProContractTests(unittest.TestCase):
                     return "1"
                 return super().query(command)
 
-        scope = WavePro("127.0.0.1", protocol="lxi")
+        scope = WP804HD("127.0.0.1", protocol="lxi")
         scope._scope = _ReadbackTransport()
         scope._connected = True
 
@@ -425,7 +453,7 @@ class WaveProContractTests(unittest.TestCase):
                 return super().query(command)
 
         transport = _TimeoutStateTransport()
-        scope = WavePro("127.0.0.1", protocol="lxi")
+        scope = WP804HD("127.0.0.1", protocol="lxi")
         scope._scope = transport
         scope._connected = True
 
@@ -444,7 +472,7 @@ class WaveProContractTests(unittest.TestCase):
 
     def test_set_auxiliary_output_prefers_auxmode_property(self) -> None:
         transport = _FakeTransport()
-        scope = WavePro("127.0.0.1", protocol="lxi")
+        scope = WP804HD("127.0.0.1", protocol="lxi")
         scope._scope = transport
         scope._connected = True
 
@@ -453,7 +481,7 @@ class WaveProContractTests(unittest.TestCase):
 
     def test_apply_settings_trigger_partial_keeps_existing_mode(self) -> None:
         transport = _FakeTransport()
-        scope = WavePro("127.0.0.1", protocol="lxi")
+        scope = WP804HD("127.0.0.1", protocol="lxi")
         scope._scope = transport
         scope._connected = True
         scope._settings["trigger"] = {"mode": "NORM", "logic": "OR", "external": False, "external_level": 1.25}
@@ -463,6 +491,127 @@ class WaveProContractTests(unittest.TestCase):
             any(("app.Acquisition.TriggerMode = \"NORM\"" in cmd) or (cmd == "TRMD NORM") for cmd in transport.writes)
         )
         self.assertFalse(any("app.Acquisition.TriggerMode = \"SINGLE\"" in cmd for cmd in transport.writes))
+
+    def test_configure_clamps_sample_rate_when_four_channels_active(self) -> None:
+        transport = _FakeTransport()
+        scope = WP804HD(
+            "127.0.0.1",
+            protocol="lxi",
+            active_channels=[1, 2, 3, 4],
+        )
+        scope._scope = transport
+        scope._connected = True
+
+        with self.assertLogs("WP804HD", level="WARNING") as logs:
+            scope.configure(
+                acquisition=AcquisitionConfig(
+                    tdiv=10e-9,
+                    sampling_period=50e-12,  # 20 GS/s request
+                )
+            )
+
+        self.assertAlmostEqual(scope._acquisition_config.sampling_period, 100e-12)
+        self.assertTrue(any("sample rate" in line.lower() for line in logs.output))
+
+    def test_configure_clamps_tdiv_for_sequence_memory_limit(self) -> None:
+        transport = _FakeTransport()
+        scope = WP804HD("127.0.0.1", protocol="lxi")
+        scope._scope = transport
+        scope._connected = True
+
+        scope.configure(sequence=SequenceConfig(enabled=True, num_segments=500))
+
+        with self.assertLogs("WP804HD", level="WARNING") as logs:
+            scope.configure(
+                acquisition=AcquisitionConfig(
+                    tdiv=50e-9,
+                    sampling_period=100e-12,  # 10 GS/s
+                )
+            )
+
+        self.assertAlmostEqual(scope._acquisition_config.tdiv, 50e-9)
+        self.assertAlmostEqual(scope._acquisition_config.sampling_period, 500e-12)
+        self.assertTrue(any("sampling period" in line.lower() for line in logs.output))
+
+    def test_configure_readback_shows_clamped_values_not_requested_values(self) -> None:
+        transport = _FakeTransport()
+        scope = WP804HD(
+            "127.0.0.1",
+            protocol="lxi",
+            active_channels=[1, 2, 3, 4],
+        )
+        scope._scope = transport
+        scope._connected = True
+
+        requested_tdiv = 50e-9
+        requested_sampling_period = 50e-12  # 20 GS/s (invalid for 4ch)
+        scope.configure(sequence=SequenceConfig(enabled=True, num_segments=500))
+        scope.configure(
+            acquisition=AcquisitionConfig(
+                tdiv=requested_tdiv,
+                sampling_period=requested_sampling_period,
+            )
+        )
+
+        rb = scope.settings["acquisition"]
+        self.assertEqual(rb["tdiv"], requested_tdiv)
+        self.assertNotEqual(rb["sampling_period"], requested_sampling_period)
+        self.assertAlmostEqual(rb["sampling_period"], 500e-12)
+
+    def test_configure_clamps_window_delay_after_tdiv_clamp(self) -> None:
+        transport = _FakeTransport()
+        scope = WP804HD("127.0.0.1", protocol="lxi")
+        scope._scope = transport
+        scope._connected = True
+        scope.configure(sequence=SequenceConfig(enabled=True, num_segments=5000))
+
+        with self.assertLogs("WP804HD", level="WARNING") as logs:
+            scope.configure(
+                acquisition=AcquisitionConfig(
+                    tdiv=1e-5,
+                    sampling_period=100e-12,
+                    window_delay=1e-3,
+                )
+            )
+
+        assert scope._acquisition_config is not None
+        max_window = scope.TIME_DIVISIONS / 2 * scope._acquisition_config.tdiv
+        self.assertAlmostEqual(scope._acquisition_config.window_delay, max_window)
+        self.assertTrue(any("window_delay" in line.lower() for line in logs.output))
+
+    def test_wr8208hd_8ch_5000seg_keeps_100ps_at_100ns_div(self) -> None:
+        transport = _FakeTransport()
+        scope = WR8208HD("127.0.0.1", protocol="lxi", active_channels=list(range(1, 9)))
+        scope._scope = transport
+        scope._connected = True
+        scope.configure(sequence=SequenceConfig(enabled=True, num_segments=5000))
+        scope.configure(
+            acquisition=AcquisitionConfig(
+                tdiv=100e-9,
+                sampling_period=100e-12,
+            )
+        )
+        assert scope._acquisition_config is not None
+        self.assertAlmostEqual(scope._acquisition_config.tdiv, 100e-9)
+        self.assertAlmostEqual(scope._acquisition_config.sampling_period, 100e-12)
+
+    def test_wr8208hd_8ch_5000seg_raises_to_200ps_at_200ns_div(self) -> None:
+        transport = _FakeTransport()
+        scope = WR8208HD("127.0.0.1", protocol="lxi", active_channels=list(range(1, 9)))
+        scope._scope = transport
+        scope._connected = True
+        scope.configure(sequence=SequenceConfig(enabled=True, num_segments=5000))
+        with self.assertLogs("WR8208HD", level="WARNING") as logs:
+            scope.configure(
+                acquisition=AcquisitionConfig(
+                    tdiv=200e-9,
+                    sampling_period=100e-12,
+                )
+            )
+        assert scope._acquisition_config is not None
+        self.assertAlmostEqual(scope._acquisition_config.tdiv, 200e-9)
+        self.assertAlmostEqual(scope._acquisition_config.sampling_period, 200e-12)
+        self.assertTrue(any("sampling period" in line.lower() for line in logs.output))
 
 
 if __name__ == "__main__":

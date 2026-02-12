@@ -14,7 +14,7 @@ Establish a basic connection to a Teledyne LeCroy oscilloscope and query its ide
 ```bash
 cd examples/01_connect
 
-# Default: WavePro at 192.168.0.10
+# Default: WP804HD at 192.168.0.10
 python connect.py
 
 # Specify model and address

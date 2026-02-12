@@ -2,7 +2,7 @@
 
 Python library for controlling Teledyne LeCroy oscilloscopes via VISA/TCP (LXI or VICP).
 
-**Supported Models:** WavePro, WaveRunner series
+**Supported Models:** WP804HD, WR8208HD series
 
 **Author:** Bong-Hwi Lim (UTokyo)
 
@@ -32,7 +32,7 @@ cd TeleDyneLeCroyControl
 
 ```python
 from teledyne_lecroy import (
-    WavePro,
+    WP804HD,
     ChannelConfig,
     ChannelTrigger,
     AcquisitionConfig,
@@ -41,7 +41,7 @@ from teledyne_lecroy import (
 )
 
 # Connect to oscilloscope (default: LXI, optional: protocol="vicp")
-with WavePro("192.168.0.10", protocol="lxi") as scope:
+with WP804HD("192.168.0.10", protocol="lxi") as scope:
     # Configure channels
     channels = {
         1: ChannelConfig(vdiv=0.2, offset=0.0, enabled=True),
@@ -80,8 +80,8 @@ with WavePro("192.168.0.10", protocol="lxi") as scope:
 
 | Class | Description |
 |-------|-------------|
-| `WavePro` | WavePro series (up to 80 GS/s, 8 GHz bandwidth) |
-| `WaveRunner` | WaveRunner series (up to 40 GS/s, 4 GHz bandwidth) |
+| `WP804HD` | WP804HD series (up to 80 GS/s, 8 GHz bandwidth) |
+| `WR8208HD` | WR8208HD series (up to 40 GS/s, 4 GHz bandwidth) |
 
 Both classes share the same API. Use the one matching your hardware.
 
@@ -212,7 +212,7 @@ Coupling.GND   # Ground coupling
 scope.connect()      # Establish connection
 scope.disconnect()   # Close connection
 # Or use context manager:
-with WavePro("192.168.0.10") as scope:
+with WP804HD("192.168.0.10") as scope:
     ...
 ```
 
@@ -276,7 +276,7 @@ python -m examples.04_sequence_capture.sequence_capture --segments 100
 
 ## Hardware Specifications
 
-| Spec | WavePro | WaveRunner |
+| Spec | WP804HD | WR8208HD |
 |------|---------|------------|
 | Max Sampling Rate | 80 GS/s | 40 GS/s |
 | Max Bandwidth | 8 GHz | 4 GHz |

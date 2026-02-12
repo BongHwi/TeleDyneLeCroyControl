@@ -16,7 +16,7 @@ Capture a single waveform from the oscilloscope and save it as a PNG plot.
 ```bash
 cd examples/03_single_capture
 
-# Default: WavePro at 192.168.0.10, output to current directory
+# Default: WP804HD at 192.168.0.10, output to current directory
 python single_capture.py
 
 # Testing without a real signal (force trigger)

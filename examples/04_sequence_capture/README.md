@@ -23,7 +23,7 @@ Sequence mode captures multiple triggered events in rapid succession, storing ea
 ```bash
 cd examples/04_sequence_capture
 
-# Default: WavePro at 192.168.0.10, 100 segments
+# Default: WP804HD at 192.168.0.10, 100 segments
 python sequence_capture.py
 
 # Testing without a real signal (force trigger)

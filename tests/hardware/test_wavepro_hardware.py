@@ -16,8 +16,8 @@ from teledyne_lecroy import (
     ScopeConnectionError,
     TriggerConfig,
     TriggerState,
-    WavePro,
-    WaveRunner,
+    WP804HD,
+    WR8208HD,
 )
 
 pytestmark = [pytest.mark.hardware]
@@ -26,10 +26,10 @@ pytestmark = [pytest.mark.hardware]
 def _make_scope():
     address = os.getenv("LECROY_SCOPE_ADDRESS", "localhost")
     protocol = os.getenv("LECROY_SCOPE_PROTOCOL", "vicp")
-    model = os.getenv("LECROY_SCOPE_MODEL", "wavepro").lower()
-    if model == "waverunner":
-        return WaveRunner(address, protocol=protocol, timeout=10.0)
-    return WavePro(address, protocol=protocol, timeout=10.0)
+    model = os.getenv("LECROY_SCOPE_MODEL", "wp804hd").lower()
+    if model in {"wr8208hd", "waverunner"}:
+        return WR8208HD(address, protocol=protocol, timeout=10.0)
+    return WP804HD(address, protocol=protocol, timeout=10.0)
 
 
 @pytest.fixture(scope="session", autouse=True)
@@ -311,26 +311,26 @@ def test_hardware_settings_roundtrip_apply_readback(_artifact_dir: Path, _vbs_lo
             ),
             (
                 "acquisition.tdiv",
-                {"acquisition": {"tdiv": target_tdiv}},
+                {"sequence": {"enabled": False}, "acquisition": {"tdiv": target_tdiv}},
                 lambda rb: math.isclose(float(rb["acquisition"]["tdiv"]), target_tdiv, rel_tol=5e-1, abs_tol=5e-9),
             ),
             (
                 "acquisition.sampling_period",
-                {"acquisition": {"sampling_period": target_sampling}},
+                {"sequence": {"enabled": False}, "acquisition": {"sampling_period": target_sampling}},
                 lambda rb: math.isclose(
                     float(rb["acquisition"]["sampling_period"]), target_sampling, rel_tol=6e-1, abs_tol=5e-12
                 ),
             ),
             (
                 "acquisition.trigger_delay",
-                {"acquisition": {"trigger_delay": target_trdl}},
+                {"sequence": {"enabled": False}, "acquisition": {"trigger_delay": target_trdl}},
                 lambda rb: math.isclose(
                     float(rb["acquisition"]["trigger_delay"]), target_trdl, rel_tol=5e-2, abs_tol=5e-6
                 ),
             ),
             (
                 "acquisition.window_delay",
-                {"acquisition": {"window_delay": target_wdelay}},
+                {"sequence": {"enabled": False}, "acquisition": {"window_delay": target_wdelay}},
                 lambda rb: math.isclose(
                     float(rb["acquisition"]["window_delay"]), target_wdelay, rel_tol=5e-2, abs_tol=5e-6
                 ),

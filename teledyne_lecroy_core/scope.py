@@ -2,7 +2,7 @@
 """
 Teledyne LeCroy oscilloscope library.
 
-Supports WavePro and WaveRunner series oscilloscopes via VISA/TCP.
+Supports WP804HD and WR8208HD series oscilloscopes via VISA/TCP.
 
 Bong-Hwi Lim (UTokyo)
 """
@@ -57,8 +57,8 @@ __all__ = [
     "SequenceData",
     # Classes
     "TeledyneLecroyScope",
-    "WavePro",
-    "WaveRunner",
+    "WP804HD",
+    "WR8208HD",
 ]
 
 
@@ -271,6 +271,11 @@ class TeledyneLecroyScope(ABC):
     # Hardware specs (override in subclasses)
     MAX_SAMPLING_RATE: float = 40e9   # samples/s
     MIN_MEMORY_SIZE: int = 500        # points
+    MAX_MEMORY_SIZE: int | None = None
+    MAX_SEQUENCE_MEMORY_SIZE: int | None = None
+    MAX_MEMORY_SIZE_BY_ACTIVE_CHANNELS: dict[int, int] | None = None
+    MAX_SEQUENCE_MEMORY_SIZE_BY_ACTIVE_CHANNELS: dict[int, int] | None = None
+    MAX_SAMPLING_RATE_BY_ACTIVE_CHANNELS: dict[int, float] | None = None
     TIME_DIVISIONS: int = 10
     VOLTAGE_DIVISIONS: int = 8
     MAX_CHANNELS: int = 4
@@ -706,14 +711,19 @@ class TeledyneLecroyScope(ABC):
 
         # Configure acquisition/timebase if provided
         if acquisition is not None:
-            self._validate_acquisition(acquisition)
-            self._configure_timebase(acquisition)
-            self._acquisition_config = acquisition
+            effective_sequence = sequence if sequence is not None else self._sequence_config
+            resolved_acquisition = self._normalize_acquisition(
+                acquisition,
+                channels=channels,
+                sequence=effective_sequence,
+            )
+            self._configure_timebase(resolved_acquisition)
+            self._acquisition_config = resolved_acquisition
             self._settings["acquisition"] = {
-                "tdiv": acquisition.tdiv,
-                "sampling_period": acquisition.sampling_period,
-                "trigger_delay": acquisition.trigger_delay,
-                "window_delay": acquisition.window_delay,
+                "tdiv": resolved_acquisition.tdiv,
+                "sampling_period": resolved_acquisition.sampling_period,
+                "trigger_delay": resolved_acquisition.trigger_delay,
+                "window_delay": resolved_acquisition.window_delay,
             }
 
         # Configure channels if provided
@@ -766,6 +776,162 @@ class TeledyneLecroyScope(ABC):
             raise ScopeConfigurationError(
                 f"window_delay ({acquisition.window_delay}s) exceeds max ({max_window}s)"
             )
+
+    def _get_enabled_channel_count(
+        self, channels: dict[int, ChannelConfig] | None = None
+    ) -> int:
+        """Estimate active/visible channel count after a pending channel update."""
+        enabled: dict[int, bool] = {ch: True for ch in self._active_channels}
+        for ch, cfg in self._channel_configs.items():
+            if ch in enabled:
+                enabled[ch] = bool(cfg.enabled)
+        if channels:
+            for ch, cfg in channels.items():
+                if ch in enabled:
+                    enabled[ch] = bool(cfg.enabled)
+        count_enabled = sum(1 for on in enabled.values() if on)
+        return max(1, count_enabled)
+
+    def _get_max_sampling_rate_for_enabled_channels(
+        self, enabled_channels: int
+    ) -> float:
+        """Resolve max sample rate from model defaults and channel count map."""
+        limits = self.MAX_SAMPLING_RATE_BY_ACTIVE_CHANNELS
+        if not limits:
+            return self.MAX_SAMPLING_RATE
+        if enabled_channels in limits:
+            return limits[enabled_channels]
+        sorted_keys = sorted(limits)
+        for key in reversed(sorted_keys):
+            if key <= enabled_channels:
+                return limits[key]
+        return limits[sorted_keys[0]]
+
+    @staticmethod
+    def _resolve_limit_by_enabled_channels(
+        enabled_channels: int,
+        *,
+        default_limit: int | None,
+        per_channel_limits: dict[int, int] | None,
+    ) -> int | None:
+        """Resolve a size limit using per-channel map when available."""
+        if per_channel_limits:
+            if enabled_channels in per_channel_limits:
+                return per_channel_limits[enabled_channels]
+            sorted_keys = sorted(per_channel_limits)
+            for key in reversed(sorted_keys):
+                if key <= enabled_channels:
+                    return per_channel_limits[key]
+            return per_channel_limits[sorted_keys[0]]
+        return default_limit
+
+    def _get_max_points_per_record(
+        self,
+        sequence: SequenceConfig | None,
+        *,
+        enabled_channels: int,
+    ) -> float | None:
+        """Return max allowed points per record/segment, if model limits are known."""
+        if sequence and sequence.enabled:
+            max_samples_total = self._resolve_limit_by_enabled_channels(
+                enabled_channels,
+                default_limit=self.MAX_SEQUENCE_MEMORY_SIZE,
+                per_channel_limits=self.MAX_SEQUENCE_MEMORY_SIZE_BY_ACTIVE_CHANNELS,
+            )
+        else:
+            max_samples_total = self._resolve_limit_by_enabled_channels(
+                enabled_channels,
+                default_limit=self.MAX_MEMORY_SIZE,
+                per_channel_limits=self.MAX_MEMORY_SIZE_BY_ACTIVE_CHANNELS,
+            )
+        if max_samples_total is None:
+            return None
+        if sequence and sequence.enabled:
+            segments = max(1, int(sequence.num_segments))
+            return float(max_samples_total) / float(segments)
+        return float(max_samples_total)
+
+    def _normalize_acquisition(
+        self,
+        acquisition: AcquisitionConfig,
+        *,
+        channels: dict[int, ChannelConfig] | None,
+        sequence: SequenceConfig | None,
+    ) -> AcquisitionConfig:
+        """Normalize acquisition values against model/channel/sequence limits."""
+        if acquisition.tdiv <= 0:
+            raise ScopeConfigurationError(f"tdiv must be > 0, got {acquisition.tdiv}")
+        if acquisition.sampling_period <= 0:
+            raise ScopeConfigurationError(
+                f"sampling_period must be > 0, got {acquisition.sampling_period}"
+            )
+
+        resolved_tdiv = acquisition.tdiv
+        resolved_sampling_period = acquisition.sampling_period
+        enabled_channels = self._get_enabled_channel_count(channels)
+
+        requested_sr = 1.0 / resolved_sampling_period
+        max_sr = self._get_max_sampling_rate_for_enabled_channels(enabled_channels)
+        if requested_sr > max_sr:
+            self._logger.warning(
+                "Requested sample rate %.3e Sa/s exceeds max %.3e Sa/s for %d active channels; clamping.",
+                requested_sr,
+                max_sr,
+                enabled_channels,
+            )
+            resolved_sampling_period = 1.0 / max_sr
+
+        max_points = self._get_max_points_per_record(
+            sequence,
+            enabled_channels=enabled_channels,
+        )
+        if max_points is not None:
+            requested_points = (
+                self.TIME_DIVISIONS * resolved_tdiv / resolved_sampling_period
+            )
+            if requested_points > max_points:
+                adjusted_sampling_period = (
+                    self.TIME_DIVISIONS * resolved_tdiv / max_points
+                )
+                self._logger.warning(
+                    "Requested TDIV %.3e s / sampling period %.3e s requires %.0f points but max is %.0f; clamping sampling period to %.3e s.",
+                    resolved_tdiv,
+                    resolved_sampling_period,
+                    requested_points,
+                    max_points,
+                    adjusted_sampling_period,
+                )
+                resolved_sampling_period = adjusted_sampling_period
+
+        requested_points = self.TIME_DIVISIONS * resolved_tdiv / resolved_sampling_period
+        if requested_points < 1.0:
+            adjusted_tdiv = resolved_sampling_period / self.TIME_DIVISIONS
+            self._logger.warning(
+                "Requested TDIV %.3e s yields less than one sample (%.3f); clamping TDIV to %.3e s.",
+                resolved_tdiv,
+                requested_points,
+                adjusted_tdiv,
+            )
+            resolved_tdiv = adjusted_tdiv
+
+        resolved_window_delay = acquisition.window_delay
+        max_window = self.TIME_DIVISIONS / 2 * resolved_tdiv
+        if resolved_window_delay > max_window:
+            self._logger.warning(
+                "Requested window_delay %.3e s exceeds max %.3e s for resolved TDIV; clamping.",
+                resolved_window_delay,
+                max_window,
+            )
+            resolved_window_delay = max_window
+
+        resolved = AcquisitionConfig(
+            tdiv=resolved_tdiv,
+            sampling_period=resolved_sampling_period,
+            trigger_delay=acquisition.trigger_delay,
+            window_delay=resolved_window_delay,
+        )
+        self._validate_acquisition(resolved)
+        return resolved
 
     def _calculate_memory_size(self, acquisition: AcquisitionConfig) -> float:
         """Calculate memory size based on sampling rate."""
@@ -1734,13 +1900,21 @@ class TeledyneLecroyScope(ABC):
         ...
 
 
-# === WavePro ===
+# === WP804HD ===
 
-class WavePro(TeledyneLecroyScope):
-    """Teledyne LeCroy WavePro series oscilloscope."""
+class WP804HD(TeledyneLecroyScope):
+    """Teledyne LeCroy WP804HD series oscilloscope."""
 
-    MAX_SAMPLING_RATE: float = 80e9   # 80 GS/s
+    MAX_SAMPLING_RATE: float = 20e9   # WP804HD single/dual-channel max
     MIN_MEMORY_SIZE: int = 500
+    MAX_MEMORY_SIZE: int | None = 2_500_000
+    MAX_SEQUENCE_MEMORY_SIZE: int | None = 500_000
+    MAX_SAMPLING_RATE_BY_ACTIVE_CHANNELS: dict[int, float] | None = {
+        1: 20e9,
+        2: 20e9,
+        3: 10e9,
+        4: 10e9,
+    }
     MAX_BANDWIDTH: float = 8e9        # 8 GHz
     ADC_BITS: int = 8
 
@@ -1871,7 +2045,11 @@ class WavePro(TeledyneLecroyScope):
         return config.channels
 
     def _setup_trigger_source(self, config: TriggerConfig) -> None:
-        """Setup trigger source with pattern trigger."""
+        """Setup trigger source with pattern trigger.
+
+        WP804HD firmware rejects VBS Pattern.* writes in some revisions.
+        Use SCPI TRPA command path directly for model robustness.
+        """
         channels = self._get_trigger_channels(config)
 
         states = ["X"] * 4
@@ -1881,36 +2059,16 @@ class WavePro(TeledyneLecroyScope):
 
         # External trigger state
         ext_state = "H" if config.external else "X"
-
-        state_map = {"H": "High", "L": "Low", "X": "DontCare"}
-        ext_state_map = {"H": "High", "X": "DontCare"}
-        logic_map = {"OR": "Or", "AND": "And"}
-        logic_value = logic_map.get(config.logic.upper(), "Or")
-
-        self._vbs_write(
-            f'app.Acquisition.Trigger.Pattern.C1LogicState = "{state_map.get(states[0], "DontCare")}"',
-            operation="trigger_pattern_write",
-        )
-        self._vbs_write(
-            f'app.Acquisition.Trigger.Pattern.C2LogicState = "{state_map.get(states[1], "DontCare")}"',
-            operation="trigger_pattern_write",
-        )
-        self._vbs_write(
-            f'app.Acquisition.Trigger.Pattern.C3LogicState = "{state_map.get(states[2], "DontCare")}"',
-            operation="trigger_pattern_write",
-        )
-        self._vbs_write(
-            f'app.Acquisition.Trigger.Pattern.C4LogicState = "{state_map.get(states[3], "DontCare")}"',
-            operation="trigger_pattern_write",
-        )
-        self._vbs_write(
-            f'app.Acquisition.Trigger.Pattern.ExtLogicState = "{ext_state_map.get(ext_state, "DontCare")}"',
-            operation="trigger_pattern_write",
-        )
-        self._vbs_write(
-            f'app.Acquisition.Trigger.Pattern.LogicOperator = "{logic_value}"',
-            operation="trigger_pattern_write",
-        )
+        logic_value = config.logic.upper() if config.logic.upper() in {"OR", "AND"} else "OR"
+        trpa_parts: list[str] = []
+        for idx, state in enumerate(states, start=1):
+            if state != "X":
+                trpa_parts.extend([f"C{idx}", state])
+        if ext_state == "H":
+            trpa_parts.extend(["EX", "H"])
+        trpa_parts.extend(["STATE", logic_value])
+        trpa_command = "TRPA " + ",".join(trpa_parts)
+        self.write(trpa_command)
 
         if config.external:
             self._logger.debug(
@@ -2244,19 +2402,73 @@ class WavePro(TeledyneLecroyScope):
         return segments
 
 
-# === WaveRunner ===
+# === WR8208HD ===
 
-class WaveRunner(WavePro):
-    """Teledyne LeCroy WaveRunner series oscilloscope.
+class WR8208HD(WP804HD):
+    """Teledyne LeCroy WR8208HD series oscilloscope.
 
-    Inherits from WavePro as SCPI commands are mostly identical.
+    Inherits from WP804HD as SCPI commands are mostly identical.
     Only hardware specs differ.
     """
 
     MAX_SAMPLING_RATE: float = 40e9   # 40 GS/s
     MIN_MEMORY_SIZE: int = 500
+    MAX_MEMORY_SIZE: int | None = None
+    MAX_SEQUENCE_MEMORY_SIZE: int | None = None
+    MAX_MEMORY_SIZE_BY_ACTIVE_CHANNELS: dict[int, int] | None = {
+        8: 250_000_000,
+        4: 500_000_000,
+        2: 1_000_000_000,
+    }
+    MAX_SEQUENCE_MEMORY_SIZE_BY_ACTIVE_CHANNELS: dict[int, int] | None = {
+        8: 50_000_000,
+        4: 100_000_000,
+        2: 200_000_000,
+    }
+    MAX_SAMPLING_RATE_BY_ACTIVE_CHANNELS: dict[int, float] | None = {
+        8: 10e9,
+        4: 20e9,
+        2: 40e9,
+        1: 40e9,
+    }
     MAX_BANDWIDTH: float = 4e9        # 4 GHz
     ADC_BITS: int = 8
+    MAX_CHANNELS: int = 8
 
-    # WaveRunner uses same SCPI commands as WavePro
-    # Override methods here if commands differ
+    def __init__(
+        self,
+        address: str,
+        protocol: Literal["lxi", "vicp"] = "lxi",
+        timeout: float = 30.0,
+        active_channels: list[int] | None = None,
+    ) -> None:
+        if active_channels is None:
+            active_channels = list(range(1, self.MAX_CHANNELS + 1))
+        super().__init__(
+            address=address,
+            protocol=protocol,
+            timeout=timeout,
+            active_channels=active_channels,
+        )
+
+    def _setup_trigger_source(self, config: TriggerConfig) -> None:
+        """Setup trigger source with SCPI pattern trigger for up to 8 channels."""
+        channels = self._get_trigger_channels(config)
+
+        states = ["X"] * self.MAX_CHANNELS
+        for ch, ch_trig in channels.items():
+            if 1 <= ch <= self.MAX_CHANNELS:
+                states[ch - 1] = ch_trig.state.value
+
+        ext_state = "H" if config.external else "X"
+        logic_value = config.logic.upper() if config.logic.upper() in {"OR", "AND"} else "OR"
+        trpa_parts: list[str] = []
+        for idx, state in enumerate(states, start=1):
+            if state != "X":
+                trpa_parts.extend([f"C{idx}", state])
+        if ext_state == "H":
+            trpa_parts.extend(["EX", "H"])
+        trpa_parts.extend(["STATE", logic_value])
+        self.write("TRPA " + ",".join(trpa_parts))
+
+    # WR8208HD otherwise uses the same SCPI commands as WP804HD.

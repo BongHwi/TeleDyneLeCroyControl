@@ -176,6 +176,7 @@ class Phase4DocsAndExamplesTests(unittest.TestCase):
                 channels=[1],
                 config=cfg,
                 force=True,
+                trigger_timeout=60.0,
             )
             with mock.patch.object(module, "parse_args", return_value=args), mock.patch.object(
                 module, "make_scope", return_value=_SingleCaptureScope()

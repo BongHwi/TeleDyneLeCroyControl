@@ -20,17 +20,18 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 from teledyne_lecroy import (
     ScopeConfigurationError,
     ScopeConnectionError,
-    WavePro,
-    WaveRunner,
+    WP804HD,
+    WR8208HD,
 )
 
 
 def make_scope(model: str, address: str, protocol: str):
     """Create a scope instance based on model name."""
-    if model == "wavepro":
-        return WavePro(address, protocol=protocol)
-    if model == "waverunner":
-        return WaveRunner(address, protocol=protocol)
+    model_key = model.lower()
+    if model_key in {"wp804hd", "wavepro"}:
+        return WP804HD(address, protocol=protocol)
+    if model_key in {"wr8208hd", "waverunner"}:
+        return WR8208HD(address, protocol=protocol)
     raise ValueError(f"Unknown model: {model}")
 
 
@@ -39,7 +40,11 @@ def parse_args():
         description="Read or apply oscilloscope settings.",
         epilog="Without --config, reads current settings from scope and saves to file.",
     )
-    p.add_argument("--model", choices=["wavepro", "waverunner"], default="wavepro")
+    p.add_argument(
+        "--model",
+        choices=["wp804hd", "wr8208hd", "wavepro", "waverunner"],
+        default="wp804hd",
+    )
     p.add_argument("--address", default="192.168.0.10")
     p.add_argument("--protocol", choices=["lxi", "vicp"], default="lxi")
     p.add_argument(

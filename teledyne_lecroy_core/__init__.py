@@ -18,8 +18,8 @@ from .scope import (
     TriggerConfig,
     TriggerSlope,
     TriggerState,
-    WavePro,
-    WaveRunner,
+    WP804HD,
+    WR8208HD,
     WaveformData,
 )
 
@@ -42,6 +42,6 @@ __all__ = [
     "WaveformData",
     "SequenceData",
     "TeledyneLecroyScope",
-    "WavePro",
-    "WaveRunner",
+    "WP804HD",
+    "WR8208HD",
 ]
