@@ -439,6 +439,23 @@ class WaveProContractTests(unittest.TestCase):
             )
         )
         self.assertIn("TRSE EDGE,SR,C1", transport.writes)
+        self.assertIn("TRSL POS", transport.writes)
+
+    def test_wavepro_trigger_pattern_sets_negative_slope_for_low_state(self) -> None:
+        transport = _FakeTransport()
+        scope = WP804HD("127.0.0.1", protocol="lxi")
+        scope._scope = transport
+        scope._connected = True
+
+        scope.set_trigger(
+            TriggerConfig(
+                channels={1: ChannelTrigger(state=TriggerState.LOW, level=0.02)},
+                mode="SINGLE",
+            )
+        )
+
+        self.assertIn("TRSE EDGE,SR,C1", transport.writes)
+        self.assertIn("TRSL NEG", transport.writes)
 
     def test_wavepro_external_only_trigger_uses_trse_without_trpa(self) -> None:
         transport = _FakeTransport()
@@ -483,6 +500,23 @@ class WaveProContractTests(unittest.TestCase):
             )
         )
         self.assertTrue(any(cmd.startswith("TRSE EDGE,SR,C1") for cmd in transport.writes))
+        self.assertIn("TRSL POS", transport.writes)
+
+    def test_waverunner_trigger_pattern_sets_negative_slope_for_low_state(self) -> None:
+        transport = _FakeTransport()
+        scope = WR8208HD("127.0.0.1", protocol="lxi")
+        scope._scope = transport
+        scope._connected = True
+
+        scope.set_trigger(
+            TriggerConfig(
+                channels={5: ChannelTrigger(state=TriggerState.LOW, level=0.02)},
+                mode="SINGLE",
+            )
+        )
+
+        self.assertIn("TRSE EDGE,SR,C5", transport.writes)
+        self.assertIn("TRSL NEG", transport.writes)
 
     def test_waverunner_external_only_trigger_falls_back_when_trpa_rejected(self) -> None:
         class _RejectExternalOnlyTrpaTransport(_FakeTransport):

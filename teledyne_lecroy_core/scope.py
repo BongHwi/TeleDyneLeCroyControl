@@ -2242,6 +2242,15 @@ class WP804HD(TeledyneLecroyScope):
             self._logger.debug(
                 f"Trigger pattern: C1={states[0]}, C2={states[1]}, C3={states[2]}, C4={states[3]}"
             )
+            # On WP firmware, TRPA state alone may not update EDGE slope reliably.
+            # Keep edge slope explicit for the selected edge source.
+            for idx, state in enumerate(states, start=1):
+                if state == TriggerState.HIGH.value:
+                    self.write("TRSL POS")
+                    break
+                if state == TriggerState.LOW.value:
+                    self.write("TRSL NEG")
+                    break
 
     def _setup_trigger_level(self, config: TriggerConfig) -> None:
         """Setup trigger level for each channel (absolute or relative to baseline)."""
@@ -2662,6 +2671,10 @@ class WR8208HD(WP804HD):
             for idx, state in enumerate(states, start=1):
                 if state != "X":
                     self.write(f"TRSE EDGE,SR,C{idx}")
+                    if state == TriggerState.HIGH.value:
+                        self.write("TRSL POS")
+                    elif state == TriggerState.LOW.value:
+                        self.write("TRSL NEG")
                     break
 
     def _get_waveform_scaling(
