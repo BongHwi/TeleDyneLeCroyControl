@@ -239,8 +239,8 @@ scope.set_trigger_mode(mode)     # Set sweep mode
 #### Data Readout
 
 ```python
-scope.readout(channels=None)           # Single capture
-scope.readout_sequence(channels=None)  # Sequence mode
+scope.readout(channels=None, keep_measurement_math=False)           # Single capture
+scope.readout_sequence(channels=None, keep_measurement_math=False)  # Sequence mode
 ```
 
 #### Low-Level SCPI
@@ -272,6 +272,7 @@ python -m examples.01_connect.connect --address 192.168.0.10 --protocol vicp
 python -m examples.02_manual_settings.manual_settings --config settings.json
 python -m examples.03_single_capture.single_capture --outdir ./captures
 python -m examples.04_sequence_capture.sequence_capture --segments 100
+python -m examples.04_sequence_capture.sequence_capture --segments 100 --sync wait-opc --opc-timeout 3
 ```
 
 ## Hardware Specifications

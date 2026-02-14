@@ -53,6 +53,8 @@ python sequence_capture.py --protocol vicp --segments 50
 | `--config` | `None` | Path to JSON settings file to apply (omit to read from scope) |
 | `--force` | off | Use force trigger for testing without real signals |
 | `--wait-timeout` | auto | Trigger wait timeout in seconds (default: `settings.sequence.timeout_seconds`) |
+| `--sync` | `wait` | Sync mode: `wait` or `wait-opc` |
+| `--opc-timeout` | `3.0` | Timeout in seconds for `*OPC?` when `--sync wait-opc` |
 
 ## Expected Output
 

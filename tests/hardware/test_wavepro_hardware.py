@@ -13,6 +13,7 @@ from teledyne_lecroy import (
     AcquisitionConfig,
     ChannelConfig,
     ChannelTrigger,
+    SequenceConfig,
     ScopeConnectionError,
     TriggerConfig,
     TriggerState,
@@ -130,6 +131,52 @@ def test_hardware_sequence_force_capture(_artifact_dir: Path, _vbs_log_file: Pat
         assert 1 in data
         assert len(data[1].raw_data) > 0
         _append_runstate(_artifact_dir, f"readout_points:{len(data[1].raw_data)}")
+    finally:
+        scope.disconnect()
+
+
+@pytest.mark.sequence
+def test_hardware_sequence_nonforce_c1_data_smoke(_artifact_dir: Path, _vbs_log_file: Path) -> None:
+    """Verify non-force C1 trigger path can acquire sequence data on active channels."""
+    scope = _make_scope()
+    try:
+        scope.connect()
+    except ScopeConnectionError as exc:
+        _append_runstate(_artifact_dir, f"sequence_nonforce_connect_failed: {exc}")
+        raise
+
+    try:
+        active_channels = list(getattr(scope, "_active_channels", [1]))
+        channels_cfg = {ch: ChannelConfig(vdiv=0.1, offset=0.0, enabled=True) for ch in active_channels}
+
+        scope.apply_settings({"instrument": {"display": "OFF"}})
+        scope.configure(
+            channels=channels_cfg,
+            acquisition=AcquisitionConfig(tdiv=1e-9, sampling_period=1e-10),
+            sequence=SequenceConfig(enabled=True, num_segments=2, timeout_enabled=True, timeout_seconds=4.0),
+        )
+        scope.set_trigger(
+            TriggerConfig(
+                channels={1: ChannelTrigger(state=TriggerState.HIGH, level=0.0)},
+                mode="NORM",
+                external=False,
+            )
+        )
+        scope.set_trigger_mode("NORM")
+        _append_runstate(_artifact_dir, "sequence_nonforce_set_trigger_mode:NORM")
+
+        scope.arm(force=False)
+        _append_runstate(_artifact_dir, "sequence_nonforce_armed")
+
+        scope.wait_for_trigger(timeout=4.0, force=False)
+        _append_runstate(_artifact_dir, "sequence_nonforce_wait_done")
+
+        data = scope.readout_sequence(channels=active_channels)
+        seg_counts = {ch: len(data[ch]) for ch in active_channels if ch in data}
+        total_segments = sum(seg_counts.values())
+
+        _append_runstate(_artifact_dir, f"sequence_nonforce_segments:{seg_counts}")
+        assert total_segments > 0, "Non-force sequence readout returned no segments on any active channel"
     finally:
         scope.disconnect()
 

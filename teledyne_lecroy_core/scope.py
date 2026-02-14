@@ -186,6 +186,8 @@ class AcquisitionConfig:
     sampling_period: float = 25e-12  # s (25ps = 40GS/s)
     trigger_delay: float = 0.0     # s
     window_delay: float = 10e-9    # s
+    max_samples: int | None = None  # Max points per record/segment (optional cap)
+    acquisition_mode: Literal["fixed_sample_rate", "set_maximum_memory"] = "fixed_sample_rate"
 
 
 @dataclass
@@ -281,6 +283,8 @@ class TeledyneLecroyScope(ABC):
     MAX_CHANNELS: int = 4
     DY_ADC_CONVERSION: float = 0.03125  # V/ADC = vdiv * 8 / 256
     X0_DIVISION: int = -5  # Time divisions for x0 calculation
+    MAX_MEASUREMENT_PARAMS: int = 12
+    MAX_MATH_TRACES: int = 8
     _VBS_FALLBACK_ALLOWED = {
         "channel_scale",
         "channel_offset",
@@ -331,6 +335,7 @@ class TeledyneLecroyScope(ABC):
         # Auto-save settings
         self._output_dir: Path | None = None
         self._auto_save_settings: bool = False
+        self._last_sequence_profile: dict[str, Any] | None = None
 
         # Validate channels
         for ch in self._active_channels:
@@ -397,6 +402,12 @@ class TeledyneLecroyScope(ABC):
         self._rm = None
         self._connected = False
         self._logger.info("Disconnected")
+
+    def get_last_sequence_profile(self) -> dict[str, Any] | None:
+        """Return latest sequence readout timing profile (if available)."""
+        if self._last_sequence_profile is None:
+            return None
+        return dict(self._last_sequence_profile)
 
     # === Low-level Communication ===
 
@@ -724,6 +735,8 @@ class TeledyneLecroyScope(ABC):
                 "sampling_period": resolved_acquisition.sampling_period,
                 "trigger_delay": resolved_acquisition.trigger_delay,
                 "window_delay": resolved_acquisition.window_delay,
+                "max_samples": resolved_acquisition.max_samples,
+                "acquisition_mode": resolved_acquisition.acquisition_mode,
             }
 
         # Configure channels if provided
@@ -865,40 +878,73 @@ class TeledyneLecroyScope(ABC):
             raise ScopeConfigurationError(
                 f"sampling_period must be > 0, got {acquisition.sampling_period}"
             )
+        if acquisition.acquisition_mode not in {"fixed_sample_rate", "set_maximum_memory"}:
+            raise ScopeConfigurationError(
+                f"Invalid acquisition_mode: {acquisition.acquisition_mode}"
+            )
 
         resolved_tdiv = acquisition.tdiv
         resolved_sampling_period = acquisition.sampling_period
         enabled_channels = self._get_enabled_channel_count(channels)
-
-        requested_sr = 1.0 / resolved_sampling_period
         max_sr = self._get_max_sampling_rate_for_enabled_channels(enabled_channels)
-        if requested_sr > max_sr:
-            self._logger.warning(
-                "Requested sample rate %.3e Sa/s exceeds max %.3e Sa/s for %d active channels; clamping.",
-                requested_sr,
-                max_sr,
-                enabled_channels,
-            )
-            resolved_sampling_period = 1.0 / max_sr
+        if acquisition.acquisition_mode == "fixed_sample_rate":
+            requested_sr = 1.0 / resolved_sampling_period
+            if requested_sr > max_sr:
+                self._logger.warning(
+                    "Requested sample rate %.3e Sa/s exceeds max %.3e Sa/s for %d active channels; clamping.",
+                    requested_sr,
+                    max_sr,
+                    enabled_channels,
+                )
+                resolved_sampling_period = 1.0 / max_sr
 
         max_points = self._get_max_points_per_record(
             sequence,
             enabled_channels=enabled_channels,
         )
-        if max_points is not None:
+        effective_max_points = max_points
+        requested_cap = acquisition.max_samples
+        resolved_cap: int | None = None
+        if requested_cap is not None:
+            if requested_cap <= 0:
+                raise ScopeConfigurationError(
+                    f"max_samples must be > 0, got {requested_cap}"
+                )
+            resolved_cap = max(self.MIN_MEMORY_SIZE, int(requested_cap))
+            if resolved_cap != requested_cap:
+                self._logger.warning(
+                    "Requested max_samples %d is below MIN_MEMORY_SIZE %d; clamping.",
+                    requested_cap,
+                    self.MIN_MEMORY_SIZE,
+                )
+            if effective_max_points is None:
+                effective_max_points = float(resolved_cap)
+            else:
+                if resolved_cap > int(effective_max_points):
+                    self._logger.warning(
+                        "Requested max_samples %d exceeds model/channel limit %.0f; using %.0f.",
+                        resolved_cap,
+                        effective_max_points,
+                        effective_max_points,
+                    )
+                effective_max_points = min(effective_max_points, float(resolved_cap))
+            if effective_max_points is not None:
+                resolved_cap = int(effective_max_points)
+
+        if effective_max_points is not None:
             requested_points = (
                 self.TIME_DIVISIONS * resolved_tdiv / resolved_sampling_period
             )
-            if requested_points > max_points:
+            if requested_points > effective_max_points:
                 adjusted_sampling_period = (
-                    self.TIME_DIVISIONS * resolved_tdiv / max_points
+                    self.TIME_DIVISIONS * resolved_tdiv / effective_max_points
                 )
                 self._logger.warning(
                     "Requested TDIV %.3e s / sampling period %.3e s requires %.0f points but max is %.0f; clamping sampling period to %.3e s.",
                     resolved_tdiv,
                     resolved_sampling_period,
                     requested_points,
-                    max_points,
+                    effective_max_points,
                     adjusted_sampling_period,
                 )
                 resolved_sampling_period = adjusted_sampling_period
@@ -929,6 +975,8 @@ class TeledyneLecroyScope(ABC):
             sampling_period=resolved_sampling_period,
             trigger_delay=acquisition.trigger_delay,
             window_delay=resolved_window_delay,
+            max_samples=resolved_cap,
+            acquisition_mode=acquisition.acquisition_mode,
         )
         self._validate_acquisition(resolved)
         return resolved
@@ -1071,6 +1119,57 @@ class TeledyneLecroyScope(ABC):
 
         return states
 
+    @staticmethod
+    def _parse_bool_response(value: str) -> bool:
+        token = value.strip().strip('"').upper()
+        if token in {"-1", "1", "TRUE", "ON"}:
+            return True
+        if token in {"0", "FALSE", "OFF"}:
+            return False
+        return "TRUE" in token or "ON" in token
+
+    def read_measurement_math_visibility(
+        self,
+        *,
+        measurement_slots: int | None = None,
+        math_traces: int | None = None,
+    ) -> dict[str, dict[int, bool]]:
+        """Read remote visibility state for measurement/math traces via VBS."""
+        self._ensure_connected()
+
+        max_meas = measurement_slots or self.MAX_MEASUREMENT_PARAMS
+        max_math = math_traces or self.MAX_MATH_TRACES
+        measurements: dict[int, bool] = {}
+        math: dict[int, bool] = {}
+
+        for p_idx in range(1, max_meas + 1):
+            try:
+                response = self.query(
+                    f"""vbs? 'return=app.Measure.P{p_idx}.View' """
+                )
+                measurements[p_idx] = self._parse_bool_response(response)
+            except Exception as exc:
+                self._logger.debug(
+                    "Could not read measurement visibility P%s: %s",
+                    p_idx,
+                    exc,
+                )
+
+        for f_idx in range(1, max_math + 1):
+            try:
+                response = self.query(
+                    f"""vbs? 'return=app.Math.F{f_idx}.View' """
+                )
+                math[f_idx] = self._parse_bool_response(response)
+            except Exception as exc:
+                self._logger.debug(
+                    "Could not read math visibility F%s: %s",
+                    f_idx,
+                    exc,
+                )
+
+        return {"measurement": measurements, "math": math}
+
     def read_all_settings(self) -> dict:
         """Read all current settings from scope as a dictionary."""
         self._ensure_connected()
@@ -1162,6 +1261,8 @@ class TeledyneLecroyScope(ABC):
             "sampling_period": acq.sampling_period,
             "trigger_delay": trigger_delay,
             "window_delay": window_delay,
+            "max_samples": self._acquisition_config.max_samples if self._acquisition_config else None,
+            "acquisition_mode": self._acquisition_config.acquisition_mode if self._acquisition_config else "fixed_sample_rate",
         }
         try:
             memory_response = self.query("MSIZ?")
@@ -1405,7 +1506,7 @@ class TeledyneLecroyScope(ABC):
         acquisition: AcquisitionConfig | None = None
         if "acquisition" in settings:
             acq_data = settings["acquisition"]
-            typed_keys = {"tdiv", "sampling_period", "trigger_delay", "window_delay"}
+            typed_keys = {"tdiv", "sampling_period", "trigger_delay", "window_delay", "max_samples", "acquisition_mode"}
             if any(k in acq_data for k in typed_keys):
                 try:
                     current_acq = self.read_acquisition_config()
@@ -1416,6 +1517,8 @@ class TeledyneLecroyScope(ABC):
                     sampling_period=acq_data.get("sampling_period", current_acq.sampling_period),
                     trigger_delay=acq_data.get("trigger_delay", current_acq.trigger_delay),
                     window_delay=acq_data.get("window_delay", current_acq.window_delay),
+                    max_samples=acq_data.get("max_samples", current_acq.max_samples),
+                    acquisition_mode=acq_data.get("acquisition_mode", current_acq.acquisition_mode),
                 )
 
         # Build sequence config only if "sequence" section is present
@@ -1748,6 +1851,9 @@ class TeledyneLecroyScope(ABC):
         if "trigger" not in self._settings:
             self._settings["trigger"] = {}
         self._settings["trigger"]["mode"] = mode
+        # Keep trigger config in sync so arm() does not overwrite user-selected mode.
+        if self._trigger_config is not None:
+            self._trigger_config.mode = mode
 
     @abstractmethod
     def _setup_trigger_source(self, config: TriggerConfig) -> None:
@@ -1766,8 +1872,48 @@ class TeledyneLecroyScope(ABC):
 
     # === Readout ===
 
-    def readout(self, channels: list[int] | None = None) -> dict[int, WaveformData]:
+    def _disable_measurement_and_math(self) -> None:
+        """Best-effort disable measurement parameters and math traces."""
+        self._disable_measurement_slots(range(1, self.MAX_MEASUREMENT_PARAMS + 1))
+
+        for f_idx in range(1, self.MAX_MATH_TRACES + 1):
+            scpi_cmd = f"F{f_idx}:TRACE OFF"
+            vbs_cmd = f"""vbs 'app.Math.F{f_idx}.View = false' """
+            try:
+                self.write(scpi_cmd)
+            except Exception as exc:
+                self._logger.debug("Ignoring math disable failure (%s): %s", scpi_cmd, exc)
+            try:
+                self.write(vbs_cmd)
+            except Exception as exc:
+                self._logger.debug("Ignoring math disable failure (%s): %s", vbs_cmd, exc)
+
+    def _disable_measurement_slots(self, slots: range | list[int] | tuple[int, ...]) -> None:
+        for p_idx in slots:
+            vbs_cmd = f"""vbs 'app.Measure.P{p_idx}.View = false' """
+            try:
+                self.write(vbs_cmd)
+            except Exception as exc:
+                self._logger.debug(
+                    "Ignoring measurement disable failure (%s): %s",
+                    vbs_cmd,
+                    exc,
+                )
+
+    def disable_measurement_and_math(self) -> None:
+        """Disable all measurement parameters and math traces."""
+        self._disable_measurement_and_math()
+
+    def readout(
+        self,
+        channels: list[int] | None = None,
+        *,
+        keep_measurement_math: bool = False,
+    ) -> dict[int, WaveformData]:
         """Read waveform data from specified channels."""
+        if not keep_measurement_math:
+            self._disable_measurement_and_math()
+
         channels = channels or list(self._channel_configs.keys())
         result: dict[int, WaveformData] = {}
 
@@ -1787,15 +1933,10 @@ class TeledyneLecroyScope(ABC):
                 inspect = self.query(f"C{ch}:INSPECT? 'WAVEDESC'")
                 actual_points, sample_width, byte_order = self._parse_wavedesc_metadata(inspect)
                 
-                # Debug print for diagnosis
-                print(f"  [DEBUG] CH{ch}: Actual={actual_points}, Target={num_points}")
-
                 # 2. Calculate sparsification
                 sparsification = 1
                 if actual_points > 0:
                     sparsification = max(1, int(actual_points / num_points))
-                
-                print(f"  [DEBUG] CH{ch}: Calculated SP={sparsification}")
 
                 # 3. Configure WFSU with SP
                 # Reset FP to 0 to ensure we start from the beginning of the buffer
@@ -1807,7 +1948,6 @@ class TeledyneLecroyScope(ABC):
                 self.write(f"C{ch}:WFSU SP,{sparsification},NP,{num_points},FP,{first_point},SN,0")
                 
                 # Small delay to ensure setting sticks
-                import time
                 time.sleep(0.05)
 
                 # 4. Read data
@@ -1843,9 +1983,15 @@ class TeledyneLecroyScope(ABC):
         return result
 
     def readout_sequence(
-        self, channels: list[int] | None = None
+        self,
+        channels: list[int] | None = None,
+        *,
+        keep_measurement_math: bool = False,
     ) -> dict[int, SequenceData]:
         """Read sequence mode data from specified channels."""
+        if not keep_measurement_math:
+            self._disable_measurement_and_math()
+
         channels = channels or list(self._channel_configs.keys())
         result: dict[int, SequenceData] = {}
 
@@ -1908,7 +2054,9 @@ class WP804HD(TeledyneLecroyScope):
     MAX_SAMPLING_RATE: float = 20e9   # WP804HD single/dual-channel max
     MIN_MEMORY_SIZE: int = 500
     MAX_MEMORY_SIZE: int | None = 2_500_000
-    MAX_SEQUENCE_MEMORY_SIZE: int | None = 500_000
+    # Empirical hardware behavior: 10k segments can sustain 500 pts/segment.
+    # Keep sequence total memory limit aligned with instrument reality.
+    MAX_SEQUENCE_MEMORY_SIZE: int | None = 5_000_000
     MAX_SAMPLING_RATE_BY_ACTIVE_CHANNELS: dict[int, float] | None = {
         1: 20e9,
         2: 20e9,
@@ -1933,10 +2081,13 @@ class WP804HD(TeledyneLecroyScope):
 
     def _configure_timebase(self, config: AcquisitionConfig) -> None:
         """Configure timebase and memory."""
-        # Calculate memory size
-        memory_size = self._calculate_memory_size(config)
-        if memory_size < self.MIN_MEMORY_SIZE:
-            memory_size = self.MIN_MEMORY_SIZE
+        # Calculate/apply memory size.
+        if config.max_samples is not None:
+            memory_size = int(config.max_samples)
+        else:
+            memory_size = int(self._calculate_memory_size(config))
+            if memory_size < self.MIN_MEMORY_SIZE:
+                memory_size = self.MIN_MEMORY_SIZE
 
         self.write(f"MSIZ {memory_size}")
         self._vbs_write(
@@ -1946,30 +2097,34 @@ class WP804HD(TeledyneLecroyScope):
         )
         self.write(f"TRDL {config.trigger_delay}")
 
-        # Set sample rate explicitly via VBS to ensure scope doesn't use higher rate
-        # This MUST be done after TDIV/MSIZ commands, as they might reset the sample rate
-        desired_sr = 1.0 / config.sampling_period
-        print(f"  [DEBUG] Setting SampleRate to {desired_sr:.0e}")
-        self.write(fr"""vbs 'app.Acquisition.Horizontal.SampleRate = {desired_sr}' """)
-
-        sr_after = self.query(r"""vbs? 'return=app.Acquisition.Horizontal.SampleRate' """)
-        print(f"  [DEBUG] SampleRate (after VBS) -> {sr_after.strip()}")
+        if config.acquisition_mode == "fixed_sample_rate":
+            # In fixed-sample-rate mode, lock the sample rate explicitly.
+            desired_sr = 1.0 / config.sampling_period
+            self._logger.debug("Setting SampleRate to %.0e", desired_sr)
+            self.write(fr"""vbs 'app.Acquisition.Horizontal.SampleRate = {desired_sr}' """)
+            sr_after = self.query(r"""vbs? 'return=app.Acquisition.Horizontal.SampleRate' """)
+            self._logger.debug("SampleRate (after VBS) -> %s", sr_after.strip())
 
         # Verify TDIV and MSIZ actually stuck
         actual_tdiv = self.query("TDIV?")
         actual_msiz = self.query("MSIZ?")
-        print(f"  [DEBUG] Config check: TDIV={actual_tdiv.strip()}, MSIZ={actual_msiz.strip()}")
+        self._logger.debug(
+            "Config check: TDIV=%s, MSIZ=%s",
+            actual_tdiv.strip(),
+            actual_msiz.strip(),
+        )
 
         # Check VBS internal values
         vbs_npts = self.query(r"""vbs? 'return=app.Acquisition.Horizontal.NumPoints' """)
-        print(f"  [DEBUG] VBS NumPoints: {vbs_npts.strip()}")
+        self._logger.debug("VBS NumPoints: %s", vbs_npts.strip())
 
-        # Waveform setup for all channels
-        num_points = self._calculate_num_points(config)
-        print(f"  [DEBUG] Calculated num_points for WFSU: {num_points}")
+        # Waveform setup for all channels.
+        num_points = max(1, int(memory_size))
+        self._logger.debug("Calculated num_points for WFSU: %s", num_points)
         sparsification = 1
+        effective_sampling_period = self.TIME_DIVISIONS * config.tdiv / float(num_points)
         first_point = int(
-            config.window_delay / config.sampling_period
+            config.window_delay / effective_sampling_period
         ) - (num_points // 2)
 
         for ch in self._active_channels:
@@ -2057,22 +2212,31 @@ class WP804HD(TeledyneLecroyScope):
             if 1 <= ch <= 4:
                 states[ch - 1] = ch_trig.state.value
 
-        # External trigger state
-        ext_state = "H" if config.external else "X"
         logic_value = config.logic.upper() if config.logic.upper() in {"OR", "AND"} else "OR"
         trpa_parts: list[str] = []
         for idx, state in enumerate(states, start=1):
-            if state != "X":
-                trpa_parts.extend([f"C{idx}", state])
-        if ext_state == "H":
+            trpa_parts.extend([f"C{idx}", state])
+        # Some firmware rejects explicit "EX,X" in TRPA.
+        if config.external:
             trpa_parts.extend(["EX", "H"])
         trpa_parts.extend(["STATE", logic_value])
         trpa_command = "TRPA " + ",".join(trpa_parts)
+        has_internal_channel_trigger = any(state != "X" for state in states)
+        if config.external and not has_internal_channel_trigger:
+            # External-only trigger is more robust via explicit edge-source select.
+            self.write("TRSE EDGE,SR,EX")
+            return
         self.write(trpa_command)
+        # Ensure trigger source follows the intended internal channel.
+        if not config.external:
+            for idx, state in enumerate(states, start=1):
+                if state != "X":
+                    self.write(f"TRSE EDGE,SR,C{idx}")
+                    break
 
         if config.external:
             self._logger.debug(
-                f"Trigger pattern: C1={states[0]}, C2={states[1]}, C3={states[2]}, C4={states[3]}, EX={ext_state}"
+                f"Trigger pattern: C1={states[0]}, C2={states[1]}, C3={states[2]}, C4={states[3]}, EX=H"
             )
         else:
             self._logger.debug(
@@ -2118,108 +2282,114 @@ class WP804HD(TeledyneLecroyScope):
             cfg = self._channel_configs.get(ch)
             vdiv = cfg.vdiv if cfg else 0.020
 
-            # Setup measurements for this channel
-            self.write(f"PACU 1,MEAN,C{ch}")  # Baseline
-            self.write(f"PACU 2,AMPL,C{ch}")  # Amplitude
+            try:
+                # Setup measurements for this channel
+                self.write(f"PACU 1,MEAN,C{ch}")  # Baseline
+                self.write(f"PACU 2,AMPL,C{ch}")  # Amplitude
 
-            # Start with zero offset
-            initial_offset = 0.0
-            self.write(f"C{ch}:OFFSET 0")
+                # Start with zero offset
+                initial_offset = 0.0
+                self.write(f"C{ch}:OFFSET 0")
 
-            # Scan for signal
-            self.write("TRMD AUTO")
-            time.sleep(1.0)
-            self.write("TRMD STOP")
-
-            amplitude_response = self.query(
-                r"""vbs? 'return=app.measure.p2.out.result.value' """
-            )
-
-            # Try to find signal by scanning offsets
-            iteration = 0
-            while True:
-                try:
-                    amplitude = float(amplitude_response.split()[-1])
-                    if amplitude >= self._MIN_SIGNAL:
-                        break
-                except (ValueError, IndexError):
-                    pass
-
-                # Move offset to search for signal
-                initial_offset -= vdiv * self._V_DIVISION
-                if initial_offset < self._MAX_OFFSET:
-                    self._logger.warning(
-                        f"Channel {ch}: Could not find signal, using offset=0"
-                    )
-                    offsets[ch] = 0.0
-                    break
-
-                self.write(f"C{ch}:OFFSET {initial_offset}")
+                # Scan for signal
                 self.write("TRMD AUTO")
                 time.sleep(1.0)
-                self.write("TRMD NORM")
+                self.write("TRMD STOP")
 
                 amplitude_response = self.query(
                     r"""vbs? 'return=app.measure.p2.out.result.value' """
                 )
 
-                iteration += 1
-                if iteration > 10:
-                    self._logger.warning(
-                        f"Channel {ch}: Max iterations, using offset=0"
+                # Try to find signal by scanning offsets
+                iteration = 0
+                while True:
+                    try:
+                        amplitude = float(amplitude_response.split()[-1])
+                        if amplitude >= self._MIN_SIGNAL:
+                            break
+                    except (ValueError, IndexError):
+                        pass
+
+                    # Move offset to search for signal
+                    initial_offset -= vdiv * self._V_DIVISION
+                    if initial_offset < self._MAX_OFFSET:
+                        self._logger.warning(
+                            f"Channel {ch}: Could not find signal, using offset=0"
+                        )
+                        offsets[ch] = 0.0
+                        break
+
+                    self.write(f"C{ch}:OFFSET {initial_offset}")
+                    self.write("TRMD AUTO")
+                    time.sleep(1.0)
+                    self.write("TRMD NORM")
+
+                    amplitude_response = self.query(
+                        r"""vbs? 'return=app.measure.p2.out.result.value' """
                     )
-                    offsets[ch] = 0.0
-                    break
-            else:
-                continue
 
-            # Found signal - measure baseline and set offset
-            baseline_response = self.query(
-                r"""vbs? 'return=app.measure.p1.out.result.value' """
-            )
-            try:
-                baseline = float(baseline_response.split()[-1])
-            except (ValueError, IndexError):
-                baseline = 0.0
+                    iteration += 1
+                    if iteration > 10:
+                        self._logger.warning(
+                            f"Channel {ch}: Max iterations, using offset=0"
+                        )
+                        offsets[ch] = 0.0
+                        break
+                else:
+                    continue
 
-            # Shift signal to visible area
-            offset = vdiv * self._SHIFT_DIVISION - baseline
-            self.write(f"C{ch}:OFFSET {offset}")
-            offsets[ch] = -offset  # Return positive offset value
+                # Found signal - measure baseline and set offset
+                baseline_response = self.query(
+                    r"""vbs? 'return=app.measure.p1.out.result.value' """
+                )
+                try:
+                    baseline = float(baseline_response.split()[-1])
+                except (ValueError, IndexError):
+                    baseline = 0.0
 
-            self._logger.info(f"Channel {ch}: auto offset = {-offset:.4f}V")
+                # Shift signal to visible area
+                offset = vdiv * self._SHIFT_DIVISION - baseline
+                self.write(f"C{ch}:OFFSET {offset}")
+                offsets[ch] = -offset  # Return positive offset value
+
+                self._logger.info(f"Channel {ch}: auto offset = {-offset:.4f}V")
+            finally:
+                self._disable_measurement_slots((1, 2))
 
         self.write("TRMD NORM")
         return offsets
 
     def _measure_baseline(self, channel: int) -> float:
         """Measure baseline using parameter measurement."""
-        self.write(f"PACU 1,MEAN,C{channel}")
+        try:
+            self.write(f"PACU 1,MEAN,C{channel}")
 
-        # Trigger briefly to get measurement
-        self.write("TRMD AUTO")
-        time.sleep(0.5)
-        self.write("TRMD NORM")
+            # Trigger briefly to get measurement
+            self.write("TRMD AUTO")
+            time.sleep(0.5)
+            self.write("TRMD NORM")
 
-        response = self.query(
-            r"""vbs? 'return=app.measure.p1.out.result.value' """
-        )
-        self._logger.debug(f"Baseline measurement response: {response}")
+            response = self.query(
+                r"""vbs? 'return=app.measure.p1.out.result.value' """
+            )
+            self._logger.debug(f"Baseline measurement response: {response}")
 
-        # Extract numeric value from response
-        # Response format can vary; try to find a valid float
-        for part in response.split():
-            try:
-                return float(part)
-            except ValueError:
-                continue
+            # Extract numeric value from response
+            # Response format can vary; try to find a valid float
+            for part in response.split():
+                try:
+                    return float(part)
+                except ValueError:
+                    continue
 
-        # If no numeric value found, use 0 as baseline (DC level)
-        self._logger.warning(
-            f"Could not parse baseline for C{channel}, using 0. "
-            f"Response was: {response}"
-        )
-        return 0.0
+            # If no numeric value found, use 0 as baseline (DC level)
+            self._logger.warning(
+                f"Could not parse baseline for C{channel}, using 0. "
+                f"Response was: {response}"
+            )
+            return 0.0
+        finally:
+            self._disable_measurement_slots((1,))
 
     def _read_channel_data(
         self,
@@ -2460,15 +2630,327 @@ class WR8208HD(WP804HD):
             if 1 <= ch <= self.MAX_CHANNELS:
                 states[ch - 1] = ch_trig.state.value
 
-        ext_state = "H" if config.external else "X"
         logic_value = config.logic.upper() if config.logic.upper() in {"OR", "AND"} else "OR"
         trpa_parts: list[str] = []
         for idx, state in enumerate(states, start=1):
-            if state != "X":
-                trpa_parts.extend([f"C{idx}", state])
-        if ext_state == "H":
+            trpa_parts.extend([f"C{idx}", state])
+        # Some WR8208HD firmware rejects explicit "EX,X" in TRPA.
+        if config.external:
             trpa_parts.extend(["EX", "H"])
         trpa_parts.extend(["STATE", logic_value])
-        self.write("TRPA " + ",".join(trpa_parts))
+        trpa_command = "TRPA " + ",".join(trpa_parts)
+        has_internal_channel_trigger = any(state != "X" for state in states)
+        if config.external and not has_internal_channel_trigger:
+            # External-only trigger is more robust via explicit edge-source select.
+            self.write("TRSE EDGE,SR,EX")
+            return
+        try:
+            self.write(trpa_command)
+        except Exception as exc:
+            # Some WR8208HD firmware rejects TRPA when using external-only trigger.
+            # Fall back to explicit edge-source selection for EX trigger.
+            if config.external and not has_internal_channel_trigger:
+                self._logger.warning(
+                    "TRPA external-only trigger rejected; falling back to TRSE EDGE,SR,EX: %s",
+                    exc,
+                )
+                self.write("TRSE EDGE,SR,EX")
+                return
+            raise
+        # Ensure trigger source follows the intended internal channel.
+        if not config.external:
+            for idx, state in enumerate(states, start=1):
+                if state != "X":
+                    self.write(f"TRSE EDGE,SR,C{idx}")
+                    break
 
-    # WR8208HD otherwise uses the same SCPI commands as WP804HD.
+    def _get_waveform_scaling(
+        self, channel: int
+    ) -> tuple[float, float, float, float]:
+        """Get waveform scaling factors with WR-local fast path.
+
+        WR8208HD sequence readout can involve very large payloads (2k-5k+ segments).
+        When configuration is already known locally, avoid extra SCPI queries
+        (`TDIV?`, `TRDL?`, `C#:VDIV?`, `C#:OFFSET?`) per channel.
+        """
+        acq = self._acquisition_config
+        ch_cfg = self._channel_configs.get(channel)
+        if acq is not None and ch_cfg is not None:
+            dx = acq.sampling_period
+            x0 = self.X0_DIVISION * acq.tdiv + acq.trigger_delay
+            dy = ch_cfg.vdiv * self.DY_ADC_CONVERSION
+            y0 = -ch_cfg.offset
+            return dx, x0, dy, y0
+        return super()._get_waveform_scaling(channel)
+
+    def readout_sequence(
+        self,
+        channels: list[int] | None = None,
+        *,
+        sn_mode: Literal["auto", "all", "loop", "batch"] = "auto",
+        batch_segments: int = 100,
+        keep_measurement_math: bool = False,
+    ) -> dict[int, SequenceData]:
+        """Read sequence data with optional SN strategy.
+
+        Args:
+            channels: Channels to read (defaults to configured channels).
+            sn_mode:
+                - "all": Use SN=0 bulk transfer (default legacy behavior)
+                - "loop": Read SN=1..N segment-by-segment
+                - "batch": Read SN=0 transfer in offset/count batches
+                - "auto": Choose "batch" for large segment count, else "all"
+            batch_segments: Segment count per batch when sn_mode="batch".
+        """
+        if sn_mode not in {"auto", "all", "loop", "batch"}:
+            raise ScopeConfigurationError(f"Invalid sn_mode: {sn_mode}")
+        if not self._sequence_config or not self._sequence_config.enabled:
+            raise ScopeConfigurationError("Sequence mode not enabled")
+        if batch_segments <= 0:
+            raise ScopeConfigurationError("batch_segments must be > 0")
+
+        t0 = time.perf_counter()
+        effective_mode = sn_mode
+        if sn_mode == "auto":
+            # Large SN=0 payloads can incur long scope-side packaging stalls.
+            effective_mode = "batch" if self._sequence_config.num_segments >= 1000 else "all"
+
+        if effective_mode == "all":
+            result = super().readout_sequence(
+                channels=channels,
+                keep_measurement_math=keep_measurement_math,
+            )
+            self._last_sequence_profile = {
+                "mode": effective_mode,
+                "channels": list(result.keys()),
+                "channel_metrics": {},
+                "total_ms": (time.perf_counter() - t0) * 1000.0,
+            }
+            return result
+
+        if not keep_measurement_math:
+            self._disable_measurement_and_math()
+
+        channels = channels or list(self._channel_configs.keys())
+        result: dict[int, SequenceData] = {}
+        channel_metrics: dict[int, dict[str, float | int]] = {}
+        for ch in channels:
+            if effective_mode == "loop":
+                segments = self._read_sequence_segments_loop(ch)
+            else:
+                segments = self._read_sequence_segments_batch(
+                    ch,
+                    batch_segments=batch_segments,
+                )
+            result[ch] = SequenceData(segments=tuple(segments), channel=ch)
+            metrics = getattr(self, "_last_sequence_channel_metric", None)
+            if isinstance(metrics, dict):
+                channel_metrics[ch] = dict(metrics)
+        self._logger.debug(
+            "Sequence readout complete (WR %s mode): channels %s",
+            effective_mode,
+            channels,
+        )
+        self._last_sequence_profile = {
+            "mode": effective_mode,
+            "batch_segments": batch_segments,
+            "channels": list(channels),
+            "channel_metrics": channel_metrics,
+            "total_ms": (time.perf_counter() - t0) * 1000.0,
+        }
+        return result
+
+    def _read_sequence_segments_loop(self, channel: int) -> list[WaveformData]:
+        """Read sequence using SN=1..N loop to reduce SN=0 packaging stalls."""
+        t0 = time.perf_counter()
+        if not self._sequence_config:
+            self._last_sequence_channel_metric = {"segments": 0, "total_ms": 0.0}
+            return []
+
+        acq_config = self._acquisition_config or self.read_acquisition_config()
+        num_points = self._calculate_num_points(acq_config)
+        num_segments = self._sequence_config.num_segments
+        if num_points <= 0 or num_segments <= 0:
+            self._last_sequence_channel_metric = {"segments": 0, "total_ms": 0.0}
+            return []
+        t_scaling0 = time.perf_counter()
+        dx, x0, dy, y0 = self._get_waveform_scaling(channel)
+        t_scaling1 = time.perf_counter()
+
+        # Probe one segment metadata to determine sample width/order.
+        t_meta0 = time.perf_counter()
+        self.write(f"C{channel}:WFSU SP,1,NP,0,FP,0,SN,1")
+        inspect = self.query(f"C{channel}:INSPECT? 'WAVEDESC'")
+        actual_points, sample_width, byte_order = self._parse_wavedesc_metadata(inspect)
+        t_meta1 = time.perf_counter()
+        if actual_points <= 0:
+            self._logger.debug(f"CH{channel}: no sequence data available (loop mode)")
+            self._last_sequence_channel_metric = {
+                "segments": 0,
+                "scaling_ms": (t_scaling1 - t_scaling0) * 1000.0,
+                "metadata_ms": (t_meta1 - t_meta0) * 1000.0,
+                "transfer_ms": 0.0,
+                "split_ms": 0.0,
+                "total_ms": (time.perf_counter() - t0) * 1000.0,
+            }
+            return []
+
+        target_points = min(num_points, actual_points)
+        t_xfer0 = time.perf_counter()
+        t_split0 = t_xfer0
+        t_split1 = t_xfer0
+        segments: list[WaveformData] = []
+        for sn in range(1, num_segments + 1):
+            self.write(f"C{channel}:WFSU SP,1,NP,{target_points},FP,0,SN,{sn}")
+            try:
+                raw = self._read_channel_data(
+                    channel,
+                    count=target_points,
+                    sample_width_bytes=sample_width,
+                    byte_order=byte_order,
+                    expected_points=None,
+                )
+            except Exception as exc:  # noqa: BLE001
+                self._logger.debug(
+                    "CH%s SN=%s read failed in loop mode: %s", channel, sn, exc
+                )
+                continue
+            if not raw:
+                continue
+            t_split0 = time.perf_counter()
+            segments.append(
+                WaveformData(
+                    raw_data=raw,
+                    channel=channel,
+                    segment=sn - 1,
+                    dx=dx,
+                    x0=x0,
+                    dy=dy,
+                    y0=y0,
+                    sample_width_bytes=sample_width,
+                    byte_order=byte_order,
+                    points=len(raw) // sample_width if sample_width else len(raw),
+                )
+            )
+            t_split1 = time.perf_counter()
+        t_xfer1 = time.perf_counter()
+        split_ms = (t_split1 - t_split0) * 1000.0 if segments else 0.0
+        self._last_sequence_channel_metric = {
+            "segments": len(segments),
+            "scaling_ms": (t_scaling1 - t_scaling0) * 1000.0,
+            "metadata_ms": (t_meta1 - t_meta0) * 1000.0,
+            "transfer_ms": (t_xfer1 - t_xfer0) * 1000.0,
+            "split_ms": split_ms,
+            "total_ms": (time.perf_counter() - t0) * 1000.0,
+        }
+
+        return segments
+
+    def _read_sequence_segments_batch(self, channel: int, *, batch_segments: int) -> list[WaveformData]:
+        """Read sequence in point-offset batches while staying in SN=0 mode."""
+        t0 = time.perf_counter()
+        if not self._sequence_config:
+            self._last_sequence_channel_metric = {"segments": 0, "total_ms": 0.0}
+            return []
+
+        acq_config = self._acquisition_config or self.read_acquisition_config()
+        num_points = self._calculate_num_points(acq_config)
+        num_segments = self._sequence_config.num_segments
+        if num_points <= 0 or num_segments <= 0:
+            self._last_sequence_channel_metric = {"segments": 0, "total_ms": 0.0}
+            return []
+        t_scaling0 = time.perf_counter()
+        dx, x0, dy, y0 = self._get_waveform_scaling(channel)
+        t_scaling1 = time.perf_counter()
+
+        # Probe once for payload metadata.
+        t_meta0 = time.perf_counter()
+        self.write(f"C{channel}:WFSU SP,1,NP,0,FP,0,SN,0")
+        inspect = self.query(f"C{channel}:INSPECT? 'WAVEDESC'")
+        actual_points, sample_width, byte_order = self._parse_wavedesc_metadata(inspect)
+        t_meta1 = time.perf_counter()
+        if actual_points <= 0:
+            self._logger.debug(f"CH{channel}: no sequence data available (batch mode)")
+            self._last_sequence_channel_metric = {
+                "segments": 0,
+                "scaling_ms": (t_scaling1 - t_scaling0) * 1000.0,
+                "metadata_ms": (t_meta1 - t_meta0) * 1000.0,
+                "transfer_ms": 0.0,
+                "split_ms": 0.0,
+                "total_ms": (time.perf_counter() - t0) * 1000.0,
+            }
+            return []
+
+        total_target_points = num_points * num_segments
+        sparsification = max(1, int(actual_points / total_target_points)) if actual_points > 0 else 1
+        self.write(
+            f"C{channel}:WFSU SP,{sparsification},NP,{total_target_points},FP,0,SN,0"
+        )
+
+        batch_points = max(num_points, num_points * batch_segments)
+        flat = bytearray()
+        point_offset = 0
+        t_xfer0 = time.perf_counter()
+        while point_offset < total_target_points:
+            count = min(batch_points, total_target_points - point_offset)
+            chunk = self._read_channel_data(
+                channel,
+                offset=point_offset,
+                count=count,
+                sample_width_bytes=sample_width,
+                byte_order=byte_order,
+                expected_points=None,
+            )
+            if not chunk:
+                break
+            flat.extend(chunk)
+
+            points_read = len(chunk) // sample_width if sample_width else len(chunk)
+            if points_read <= 0:
+                break
+            point_offset += points_read
+            if points_read < count:
+                # Partial payload received; keep what we have.
+                break
+        t_xfer1 = time.perf_counter()
+
+        raw = bytes(flat)
+        bytes_per_segment = num_points * sample_width
+        if bytes_per_segment <= 0:
+            return []
+        full_segments = min(num_segments, len(raw) // bytes_per_segment)
+        if full_segments <= 0:
+            return []
+
+        seg_dx = dx * sparsification
+        segments: list[WaveformData] = []
+        t_split0 = time.perf_counter()
+        for seg_idx in range(full_segments):
+            start = seg_idx * bytes_per_segment
+            end = start + bytes_per_segment
+            seg_raw = raw[start:end]
+            segments.append(
+                WaveformData(
+                    raw_data=seg_raw,
+                    channel=channel,
+                    segment=seg_idx,
+                    dx=seg_dx,
+                    x0=x0,
+                    dy=dy,
+                    y0=y0,
+                    sample_width_bytes=sample_width,
+                    byte_order=byte_order,
+                    points=len(seg_raw) // sample_width if sample_width else len(seg_raw),
+                )
+            )
+        t_split1 = time.perf_counter()
+        self._last_sequence_channel_metric = {
+            "segments": len(segments),
+            "scaling_ms": (t_scaling1 - t_scaling0) * 1000.0,
+            "metadata_ms": (t_meta1 - t_meta0) * 1000.0,
+            "transfer_ms": (t_xfer1 - t_xfer0) * 1000.0,
+            "split_ms": (t_split1 - t_split0) * 1000.0,
+            "total_ms": (time.perf_counter() - t0) * 1000.0,
+        }
+
+        return segments

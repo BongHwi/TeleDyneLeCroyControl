@@ -91,6 +91,15 @@ class VbsPolicyTests(unittest.TestCase):
                 fallback_scpi="TRPA C1,H",
             )
 
+    def test_disable_measurement_and_math_emits_commands(self) -> None:
+        scope = DummyScope()
+
+        scope.disable_measurement_and_math()
+
+        self.assertTrue(any("app.Measure.P1.View = false" in cmd for cmd in scope.commands))
+        self.assertTrue(any(cmd.startswith("F1:TRACE OFF") for cmd in scope.commands))
+        self.assertTrue(any("app.Math.F1.View = false" in cmd for cmd in scope.commands))
+
 
 class RunStateTests(unittest.TestCase):
     def test_timeout_resolution_priority(self) -> None:

@@ -114,6 +114,18 @@ def parse_args():
         default=None,
         help="Wait timeout in seconds (default: use settings.sequence.timeout_seconds if available)",
     )
+    p.add_argument(
+        "--sync",
+        choices=["wait", "wait-opc"],
+        default="wait",
+        help="Synchronization strategy: wait only, or wait then *OPC? for processing completion.",
+    )
+    p.add_argument(
+        "--opc-timeout",
+        type=float,
+        default=3.0,
+        help="Timeout in seconds for *OPC? when --sync wait-opc.",
+    )
     return p.parse_args()
 
 
@@ -174,6 +186,20 @@ def main() -> None:
                 scope.wait_for_trigger(timeout=wait_timeout, force=args.force)
             print("Triggered.")
 
+            sync_mode = getattr(args, "sync", "wait")
+            opc_timeout = float(getattr(args, "opc_timeout", 3.0))
+            timeout_flag = 0
+            if sync_mode == "wait-opc":
+                print(f"Sync mode: wait-opc (opc timeout={opc_timeout:.1f}s)")
+                try:
+                    with timed("opc"):
+                        scope.wait_opc(timeout=opc_timeout)
+                except Exception as exc:
+                    timeout_flag = 1
+                    print(f"*OPC? timeout/error: {exc}")
+            else:
+                print("Sync mode: wait")
+
             with timed("readout_sequence"):
                 data = scope.readout_sequence(channels=channels)
 
@@ -186,6 +212,7 @@ def main() -> None:
                 points_per_seg = len(seq[0].raw_data) if len(seq) > 0 else 0
                 print(f"  CH{ch}: {len(seq)} segments × {points_per_seg:,} points = {ch_bytes:,} bytes ({ch_bytes/1e6:.2f} MB)")
             print(f"  Total: {total_bytes:,} bytes ({total_bytes/1e6:.2f} MB)")
+            print(f"  timeout_flag: {timeout_flag}")
             print()
 
             for ch, seq in data.items():
