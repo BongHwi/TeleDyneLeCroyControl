@@ -257,6 +257,61 @@ class WaveProContractTests(unittest.TestCase):
         self.assertTrue(vis["math"][1])
         self.assertTrue(vis["math"][2])
 
+    def test_readout_uses_word_transfer_and_16bit_voltage_scaling(self) -> None:
+        class _WordAwareTransport(_FakeTransport):
+            def __init__(self) -> None:
+                super().__init__()
+                self.word_mode = False
+
+            def write(self, command: str) -> None:
+                super().write(command)
+                if "CFMT" in command.upper() and "WORD" in command.upper():
+                    self.word_mode = True
+
+            def query(self, command: str) -> str:
+                cmd = command.strip()
+                if "INSPECT? 'WAVEDESC'" in cmd:
+                    comm_type = "WORD" if self.word_mode else "BYTE"
+                    return "\n".join(
+                        [
+                            f"WAVE_ARRAY_COUNT : {self.wavedesc_points}",
+                            f"COMM_TYPE : {comm_type}",
+                            "COMM_ORDER : LOFIRST",
+                        ]
+                    )
+                return super().query(command)
+
+            def read_raw(self) -> bytes:
+                if self.malformed_block:
+                    return b"BROKEN"
+                if self.word_mode:
+                    payload = b"".join(
+                        int(i % 32768).to_bytes(2, byteorder="little", signed=True)
+                        for i in range(self.payload_points)
+                    )
+                else:
+                    payload = bytes((i % 128 for i in range(self.payload_points)))
+                payload_len = len(payload)
+                block = f"#3{payload_len:03d}".encode("ascii") + payload
+                return block + b"\n"
+
+        transport = _WordAwareTransport()
+        scope = WP804HD("127.0.0.1", protocol="lxi")
+        scope._scope = transport
+        scope._connected = True
+        scope._acquisition_config = AcquisitionConfig(tdiv=1e-3, sampling_period=1e-4)
+        scope._channel_configs = {1: ChannelConfig(vdiv=0.2, offset=0.0, enabled=True)}
+
+        data = scope.readout(channels=[1])
+
+        self.assertIn(1, data)
+        self.assertEqual(data[1].sample_width_bytes, 2)
+        self.assertTrue(
+            any("CFMT" in cmd and "WORD" in cmd for cmd in transport.writes),
+            "Expected readout to force COMM_TYPE WORD transfer",
+        )
+        self.assertAlmostEqual(data[1].dy, 0.2 * 8.0 / 65536.0, places=12)
+
     def test_malformed_block_raises_scope_configuration_error(self) -> None:
         scope = WP804HD("127.0.0.1", protocol="lxi")
         scope._scope = _FakeTransport(malformed_block=True)

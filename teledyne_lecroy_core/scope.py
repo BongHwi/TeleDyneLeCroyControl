@@ -281,7 +281,7 @@ class TeledyneLecroyScope(ABC):
     TIME_DIVISIONS: int = 10
     VOLTAGE_DIVISIONS: int = 8
     MAX_CHANNELS: int = 4
-    DY_ADC_CONVERSION: float = 0.03125  # V/ADC = vdiv * 8 / 256
+    DY_ADC_CONVERSION: float = 0.03125  # Legacy 8-bit factor; use _dy_adc_conversion().
     X0_DIVISION: int = -5  # Time divisions for x0 calculation
     MAX_MEASUREMENT_PARAMS: int = 12
     MAX_MATH_TRACES: int = 8
@@ -428,6 +428,17 @@ class TeledyneLecroyScope(ABC):
         response = self._scope.query(command).strip()
         self._logger.debug(f"QUERY: {command} -> {response}")
         return response
+
+    def _ensure_word_waveform_transfer(self) -> None:
+        """Force 16-bit waveform transport to preserve >8-bit ADC resolution."""
+        self.write("CFMT DEF9,WORD,BIN")
+
+    @staticmethod
+    def _dy_adc_conversion(sample_width_bytes: Literal[1, 2]) -> float:
+        """Return volts-per-ADC conversion multiplier from sample width."""
+        if sample_width_bytes == 2:
+            return 8.0 / 65536.0
+        return 8.0 / 256.0
 
     def _mask_log_value(self, value: str) -> str:
         """Mask sensitive values before writing diagnostic logs."""
@@ -1914,6 +1925,7 @@ class TeledyneLecroyScope(ABC):
         if not keep_measurement_math:
             self._disable_measurement_and_math()
 
+        self._ensure_word_waveform_transfer()
         channels = channels or list(self._channel_configs.keys())
         result: dict[int, WaveformData] = {}
 
@@ -1959,7 +1971,9 @@ class TeledyneLecroyScope(ABC):
                     byte_order=byte_order,
                     expected_points=expected_points,
                 )
-                dx, x0, dy, y0 = self._get_waveform_scaling(ch)
+                dx, x0, dy, y0 = self._get_waveform_scaling(
+                    ch, sample_width_bytes=sample_width
+                )
                 
                 # If sparsified, adjust dx (time step)
                 if sparsification > 1:
@@ -1992,6 +2006,7 @@ class TeledyneLecroyScope(ABC):
         if not keep_measurement_math:
             self._disable_measurement_and_math()
 
+        self._ensure_word_waveform_transfer()
         channels = channels or list(self._channel_configs.keys())
         result: dict[int, SequenceData] = {}
 
@@ -2030,7 +2045,7 @@ class TeledyneLecroyScope(ABC):
 
     @abstractmethod
     def _get_waveform_scaling(
-        self, channel: int
+        self, channel: int, sample_width_bytes: Literal[1, 2] = 1
     ) -> tuple[float, float, float, float]:
         """Get scaling factors (dx, x0, dy, y0) for channel."""
         ...
@@ -2467,7 +2482,7 @@ class WP804HD(TeledyneLecroyScope):
             raise ScopeConfigurationError(f"Failed to parse waveform block: {exc}") from exc
 
     def _get_waveform_scaling(
-        self, channel: int
+        self, channel: int, sample_width_bytes: Literal[1, 2] = 1
     ) -> tuple[float, float, float, float]:
         """Get waveform scaling factors.
 
@@ -2489,7 +2504,7 @@ class WP804HD(TeledyneLecroyScope):
         # Get voltage scaling (dy, y0)
         dy = self._parse_numeric_response(
             self.query(f"C{channel}:VDIV?")
-        ) * self.DY_ADC_CONVERSION
+        ) * self._dy_adc_conversion(sample_width_bytes)
         y0 = -self._parse_numeric_response(self.query(f"C{channel}:OFFSET?"))
 
         return dx, x0, dy, y0
@@ -2514,8 +2529,6 @@ class WP804HD(TeledyneLecroyScope):
         if num_points <= 0 or num_segments <= 0:
             return []
 
-        dx, x0, dy, y0 = self._get_waveform_scaling(channel)
-
         # Configure WFSU once to request all sequence segments in one transfer.
         self.write(f"C{channel}:WFSU SP,1,NP,0,FP,0,SN,0")
         inspect = self.query(f"C{channel}:INSPECT? 'WAVEDESC'")
@@ -2523,6 +2536,9 @@ class WP804HD(TeledyneLecroyScope):
         if actual_points <= 0:
             self._logger.debug(f"CH{channel}: no sequence data available")
             return []
+        dx, x0, dy, y0 = self._get_waveform_scaling(
+            channel, sample_width_bytes=sample_width
+        )
 
         total_target_points = num_points * num_segments
         sparsification = max(1, int(actual_points / total_target_points)) if actual_points > 0 else 1
@@ -2678,7 +2694,7 @@ class WR8208HD(WP804HD):
                     break
 
     def _get_waveform_scaling(
-        self, channel: int
+        self, channel: int, sample_width_bytes: Literal[1, 2] = 1
     ) -> tuple[float, float, float, float]:
         """Get waveform scaling factors with WR-local fast path.
 
@@ -2691,10 +2707,12 @@ class WR8208HD(WP804HD):
         if acq is not None and ch_cfg is not None:
             dx = acq.sampling_period
             x0 = self.X0_DIVISION * acq.tdiv + acq.trigger_delay
-            dy = ch_cfg.vdiv * self.DY_ADC_CONVERSION
+            dy = ch_cfg.vdiv * self._dy_adc_conversion(sample_width_bytes)
             y0 = -ch_cfg.offset
             return dx, x0, dy, y0
-        return super()._get_waveform_scaling(channel)
+        return super()._get_waveform_scaling(
+            channel, sample_width_bytes=sample_width_bytes
+        )
 
     def readout_sequence(
         self,
@@ -2787,15 +2805,16 @@ class WR8208HD(WP804HD):
             self._last_sequence_channel_metric = {"segments": 0, "total_ms": 0.0}
             return []
         t_scaling0 = time.perf_counter()
-        dx, x0, dy, y0 = self._get_waveform_scaling(channel)
-        t_scaling1 = time.perf_counter()
-
         # Probe one segment metadata to determine sample width/order.
         t_meta0 = time.perf_counter()
         self.write(f"C{channel}:WFSU SP,1,NP,0,FP,0,SN,1")
         inspect = self.query(f"C{channel}:INSPECT? 'WAVEDESC'")
         actual_points, sample_width, byte_order = self._parse_wavedesc_metadata(inspect)
         t_meta1 = time.perf_counter()
+        dx, x0, dy, y0 = self._get_waveform_scaling(
+            channel, sample_width_bytes=sample_width
+        )
+        t_scaling1 = time.perf_counter()
         if actual_points <= 0:
             self._logger.debug(f"CH{channel}: no sequence data available (loop mode)")
             self._last_sequence_channel_metric = {
@@ -2873,15 +2892,16 @@ class WR8208HD(WP804HD):
             self._last_sequence_channel_metric = {"segments": 0, "total_ms": 0.0}
             return []
         t_scaling0 = time.perf_counter()
-        dx, x0, dy, y0 = self._get_waveform_scaling(channel)
-        t_scaling1 = time.perf_counter()
-
         # Probe once for payload metadata.
         t_meta0 = time.perf_counter()
         self.write(f"C{channel}:WFSU SP,1,NP,0,FP,0,SN,0")
         inspect = self.query(f"C{channel}:INSPECT? 'WAVEDESC'")
         actual_points, sample_width, byte_order = self._parse_wavedesc_metadata(inspect)
         t_meta1 = time.perf_counter()
+        dx, x0, dy, y0 = self._get_waveform_scaling(
+            channel, sample_width_bytes=sample_width
+        )
+        t_scaling1 = time.perf_counter()
         if actual_points <= 0:
             self._logger.debug(f"CH{channel}: no sequence data available (batch mode)")
             self._last_sequence_channel_metric = {
