@@ -2740,6 +2740,10 @@ class WR8208HD(WP804HD):
         if batch_segments <= 0:
             raise ScopeConfigurationError("batch_segments must be > 0")
 
+        # Keep sequence readout transport consistent with single readout:
+        # force word transfer so WAVEDESC and payload stay in 16-bit mode.
+        self._ensure_word_waveform_transfer()
+
         t0 = time.perf_counter()
         effective_mode = sn_mode
         if sn_mode == "auto":

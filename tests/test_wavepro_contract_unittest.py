@@ -474,6 +474,64 @@ class WaveProContractTests(unittest.TestCase):
             any(("TRPA " in cmd and "C8,H" in cmd) for cmd in transport.writes)
         )
 
+    def test_waverunner_sequence_batch_uses_word_transfer_and_16bit_scaling(self) -> None:
+        class _WordAwareSequenceTransport(_FakeTransport):
+            def __init__(self) -> None:
+                super().__init__(payload_points=100, wavedesc_points=200)
+                self.word_mode = False
+                self._next_points = 100
+
+            def write(self, command: str) -> None:
+                super().write(command)
+                if "CFMT" in command.upper() and "WORD" in command.upper():
+                    self.word_mode = True
+                match = core_scope.re.search(r"WF\? DAT1,NO,\d+,NP,(\d+)", command)
+                if match:
+                    self._next_points = int(match.group(1))
+
+            def query(self, command: str) -> str:
+                if "INSPECT? 'WAVEDESC'" in command.strip():
+                    comm_type = "WORD" if self.word_mode else "BYTE"
+                    return "\n".join(
+                        [
+                            f"WAVE_ARRAY_COUNT : {self.wavedesc_points}",
+                            f"COMM_TYPE : {comm_type}",
+                            "COMM_ORDER : LOFIRST",
+                        ]
+                    )
+                return super().query(command)
+
+            def read_raw(self) -> bytes:
+                if self.word_mode:
+                    payload = b"".join(
+                        int(i % 32768).to_bytes(2, byteorder="little", signed=True)
+                        for i in range(self._next_points)
+                    )
+                else:
+                    payload = bytes((i % 128 for i in range(self._next_points)))
+                payload_len_str = str(len(payload))
+                block = f"#{len(payload_len_str)}{payload_len_str}".encode("ascii") + payload
+                return block + b"\n"
+
+        transport = _WordAwareSequenceTransport()
+        scope = WR8208HD("127.0.0.1", protocol="lxi")
+        scope._scope = transport
+        scope._connected = True
+        scope._acquisition_config = AcquisitionConfig(tdiv=1e-3, sampling_period=1e-4)
+        scope._channel_configs = {1: ChannelConfig(vdiv=0.2, offset=0.0, enabled=True)}
+        scope._sequence_config = SequenceConfig(enabled=True, num_segments=2)
+
+        data = scope.readout_sequence(channels=[1], sn_mode="batch", batch_segments=1)
+
+        self.assertIn(1, data)
+        self.assertEqual(len(data[1]), 2)
+        self.assertEqual(data[1][0].sample_width_bytes, 2)
+        self.assertTrue(
+            any("CFMT" in cmd and "WORD" in cmd for cmd in transport.writes),
+            "Expected sequence readout to force COMM_TYPE WORD transfer",
+        )
+        self.assertAlmostEqual(data[1][0].dy, 0.2 * 8.0 / 65536.0, places=12)
+
     def test_wavepro_trigger_pattern_always_writes_full_channel_state_map(self) -> None:
         transport = _FakeTransport()
         scope = WP804HD("127.0.0.1", protocol="lxi")
