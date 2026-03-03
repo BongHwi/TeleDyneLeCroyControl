@@ -186,6 +186,7 @@ class AcquisitionConfig:
     """Acquisition timing configuration."""
     tdiv: float = 5e-9             # s/div
     sampling_period: float = 25e-12  # s (25ps = 40GS/s)
+    clock_source: Literal["internal", "external"] = "internal"
     trigger_delay: float = 0.0     # s
     window_delay: float = 10e-9    # s
     max_samples: int | None = None  # Max points per record/segment (optional cap)
@@ -746,6 +747,7 @@ class TeledyneLecroyScope(ABC):
             self._settings["acquisition"] = {
                 "tdiv": resolved_acquisition.tdiv,
                 "sampling_period": resolved_acquisition.sampling_period,
+                "clock_source": resolved_acquisition.clock_source,
                 "trigger_delay": resolved_acquisition.trigger_delay,
                 "window_delay": resolved_acquisition.window_delay,
                 "max_samples": resolved_acquisition.max_samples,
@@ -895,6 +897,10 @@ class TeledyneLecroyScope(ABC):
             raise ScopeConfigurationError(
                 f"Invalid acquisition_mode: {acquisition.acquisition_mode}"
             )
+        if acquisition.clock_source not in {"internal", "external"}:
+            raise ScopeConfigurationError(
+                f"Invalid clock_source: {acquisition.clock_source}"
+            )
 
         resolved_tdiv = acquisition.tdiv
         resolved_sampling_period = acquisition.sampling_period
@@ -986,6 +992,7 @@ class TeledyneLecroyScope(ABC):
         resolved = AcquisitionConfig(
             tdiv=resolved_tdiv,
             sampling_period=resolved_sampling_period,
+            clock_source=acquisition.clock_source,
             trigger_delay=acquisition.trigger_delay,
             window_delay=resolved_window_delay,
             max_samples=resolved_cap,
@@ -1118,7 +1125,21 @@ class TeledyneLecroyScope(ABC):
             self._logger.warning(f"Could not parse memory size: {memory_response}")
             sampling_period = tdiv / 1000
 
-        return AcquisitionConfig(tdiv=tdiv, sampling_period=sampling_period)
+        clock_source = "internal"
+        try:
+            clock_source_response = self.query(
+                r"""vbs? 'return=app.Acquisition.Horizontal.ClockSource' """
+            ).strip().strip('"').lower()
+            if "ext" in clock_source_response:
+                clock_source = "external"
+        except Exception as e:
+            self._logger.debug(f"Could not read acquisition clock source: {e}")
+
+        return AcquisitionConfig(
+            tdiv=tdiv,
+            sampling_period=sampling_period,
+            clock_source=clock_source,
+        )
 
     def read_trigger_level(self, channel: int) -> float:
         """Read current trigger level for a channel."""
@@ -1291,6 +1312,7 @@ class TeledyneLecroyScope(ABC):
         acquisition = {
             "tdiv": acq.tdiv,
             "sampling_period": acq.sampling_period,
+            "clock_source": acq.clock_source,
             "trigger_delay": trigger_delay,
             "window_delay": window_delay,
             "max_samples": self._acquisition_config.max_samples if self._acquisition_config else None,
@@ -1308,6 +1330,16 @@ class TeledyneLecroyScope(ABC):
             acquisition["sample_rate"] = self._parse_numeric_response(sample_rate_response)
         except Exception as e:
             self._logger.debug(f"Could not read sample rate: {e}")
+        try:
+            clock_source_response = self.query(
+                r"""vbs? 'return=app.Acquisition.Horizontal.ClockSource' """
+            ).strip().strip('"').lower()
+            if "ext" in clock_source_response:
+                acquisition["clock_source"] = "external"
+            elif "int" in clock_source_response:
+                acquisition["clock_source"] = "internal"
+        except Exception as e:
+            self._logger.debug(f"Could not read clock source: {e}")
 
         # Read trigger mode (prefer VBS TriggerMode, fallback to TRMD?)
         trigger_mode = "SINGLE"
@@ -1538,7 +1570,7 @@ class TeledyneLecroyScope(ABC):
         acquisition: AcquisitionConfig | None = None
         if "acquisition" in settings:
             acq_data = settings["acquisition"]
-            typed_keys = {"tdiv", "sampling_period", "trigger_delay", "window_delay", "max_samples", "acquisition_mode"}
+            typed_keys = {"tdiv", "sampling_period", "clock_source", "trigger_delay", "window_delay", "max_samples", "acquisition_mode"}
             if any(k in acq_data for k in typed_keys):
                 try:
                     current_acq = self.read_acquisition_config()
@@ -1547,6 +1579,7 @@ class TeledyneLecroyScope(ABC):
                 acquisition = AcquisitionConfig(
                     tdiv=acq_data.get("tdiv", current_acq.tdiv),
                     sampling_period=acq_data.get("sampling_period", current_acq.sampling_period),
+                    clock_source=acq_data.get("clock_source", current_acq.clock_source),
                     trigger_delay=acq_data.get("trigger_delay", current_acq.trigger_delay),
                     window_delay=acq_data.get("window_delay", current_acq.window_delay),
                     max_samples=acq_data.get("max_samples", current_acq.max_samples),
@@ -2135,6 +2168,8 @@ class WP804HD(TeledyneLecroyScope):
             operation="acquisition_horizontal_scale",
             fallback_scpi=f"TDIV {config.tdiv}",
         )
+        clock_source = "External" if config.clock_source == "external" else "Internal"
+        self.write(fr"""vbs 'app.Acquisition.Horizontal.ClockSource = "{clock_source}"' """)
         self.write(f"TRDL {config.trigger_delay}")
 
         if config.acquisition_mode == "fixed_sample_rate":

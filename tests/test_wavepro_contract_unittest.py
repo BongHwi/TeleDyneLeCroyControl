@@ -95,6 +95,8 @@ class _FakeTransport:
                 return "TriggerOut"
             if "Horizontal.SampleRate" in cmd:
                 return "1E4"
+            if "Horizontal.ClockSource" in cmd:
+                return "Internal"
             if "Horizontal.NumPoints" in cmd:
                 return "100"
             return "0"
@@ -923,6 +925,7 @@ class WaveProContractTests(unittest.TestCase):
         self.assertEqual(settings["instrument"]["display"], "ON")
         self.assertEqual(settings["trigger"]["logic"], "OR")
         self.assertEqual(settings["acquisition"]["memory_size"], 1000)
+        self.assertEqual(settings["acquisition"]["clock_source"], "internal")
         self.assertIn("attenuation", settings["channels"]["1"])
 
         scope.apply_settings(
@@ -944,6 +947,7 @@ class WaveProContractTests(unittest.TestCase):
                     "window_delay": 0.0,
                     "memory_size": 1000,
                     "sample_rate": 1e4,
+                    "clock_source": "external",
                 },
                 "trigger": {
                     "channels": {"1": {"state": "HIGH", "level": 0.02}},
@@ -964,6 +968,9 @@ class WaveProContractTests(unittest.TestCase):
         self.assertTrue(any("app.Acquisition.C1.View = 0" in cmd for cmd in transport.writes))
         self.assertTrue(any(cmd.startswith("C1:ATTN 1.0") for cmd in transport.writes))
         self.assertTrue(any(cmd.startswith("MSIZ 1000") for cmd in transport.writes))
+        self.assertTrue(
+            any("app.Acquisition.Horizontal.ClockSource = \"External\"" in cmd for cmd in transport.writes)
+        )
 
     def test_read_all_settings_parses_sequence_with_on_comma_and_aux_numeric(self) -> None:
         class _ReadbackTransport(_FakeTransport):
