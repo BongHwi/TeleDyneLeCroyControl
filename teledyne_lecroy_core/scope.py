@@ -12,6 +12,7 @@ import json
 import logging
 import re
 import time
+import warnings
 from abc import ABC, abstractmethod
 from itertools import count
 from pathlib import Path
@@ -1061,6 +1062,25 @@ class TeledyneLecroyScope(ABC):
 
         return points, sample_width, byte_order
 
+    def _resolve_points_with_wavedesc(
+        self,
+        *,
+        payload_points: int,
+        wavedesc_points: int | None,
+        context: str,
+    ) -> int:
+        """Resolve point count using WAVEDESC as authoritative when available."""
+        if wavedesc_points is None or wavedesc_points <= 0:
+            return payload_points
+        if payload_points != wavedesc_points:
+            message = (
+                f"{context} point mismatch: payload={payload_points} "
+                f"wavedesc={wavedesc_points}; using wavedesc"
+            )
+            self._logger.warning(message)
+            warnings.warn(message, RuntimeWarning, stacklevel=2)
+        return wavedesc_points
+
     def read_channel_config(self, channel: int) -> ChannelConfig:
         """Read current channel configuration from scope."""
         self._ensure_connected()
@@ -1990,7 +2010,11 @@ class TeledyneLecroyScope(ABC):
                     trigger_time=trigger_time,
                     sample_width_bytes=sample_width,
                     byte_order=byte_order,
-                    points=len(raw) // sample_width if sample_width else len(raw),
+                    points=self._resolve_points_with_wavedesc(
+                        payload_points=len(raw) // sample_width if sample_width else len(raw),
+                        wavedesc_points=actual_points,
+                        context=f"CH{ch} readout",
+                    ),
                 )
 
         self._logger.debug(f"Readout complete: channels {channels}")
@@ -2574,6 +2598,9 @@ class WP804HD(TeledyneLecroyScope):
             return []
 
         seg_dx = dx * sparsification
+        # In SN=0 bulk mode, WAVEDESC point semantics can differ by model/firmware.
+        # Prefer WAVEDESC only when segment cardinality is unambiguous.
+        wavedesc_points_per_segment = actual_points if num_segments == 1 else None
         segments: list[WaveformData] = []
         for seg_idx in range(full_segments):
             start = seg_idx * split_bytes
@@ -2590,7 +2617,11 @@ class WP804HD(TeledyneLecroyScope):
                     y0=y0,
                     sample_width_bytes=sample_width,
                     byte_order=byte_order,
-                    points=len(seg_raw) // sample_width if sample_width else len(seg_raw),
+                    points=self._resolve_points_with_wavedesc(
+                        payload_points=len(seg_raw) // sample_width if sample_width else len(seg_raw),
+                        wavedesc_points=wavedesc_points_per_segment,
+                        context=f"CH{channel} sequence seg={seg_idx}",
+                    ),
                 )
             )
 
@@ -2835,6 +2866,7 @@ class WR8208HD(WP804HD):
         t_xfer0 = time.perf_counter()
         t_split0 = t_xfer0
         t_split1 = t_xfer0
+        wavedesc_points_per_segment = actual_points
         segments: list[WaveformData] = []
         for sn in range(1, num_segments + 1):
             self.write(f"C{channel}:WFSU SP,1,NP,{target_points},FP,0,SN,{sn}")
@@ -2865,7 +2897,11 @@ class WR8208HD(WP804HD):
                     y0=y0,
                     sample_width_bytes=sample_width,
                     byte_order=byte_order,
-                    points=len(raw) // sample_width if sample_width else len(raw),
+                    points=self._resolve_points_with_wavedesc(
+                        payload_points=len(raw) // sample_width if sample_width else len(raw),
+                        wavedesc_points=wavedesc_points_per_segment,
+                        context=f"CH{channel} sequence-loop seg={sn - 1}",
+                    ),
                 )
             )
             t_split1 = time.perf_counter()
@@ -2960,6 +2996,9 @@ class WR8208HD(WP804HD):
             return []
 
         seg_dx = dx * sparsification
+        # In batch SN=0 mode, WAVEDESC may report per-segment or aggregate points.
+        # Trust it only when there is exactly one segment requested.
+        wavedesc_points_per_segment = actual_points if num_segments == 1 else None
         segments: list[WaveformData] = []
         t_split0 = time.perf_counter()
         for seg_idx in range(full_segments):
@@ -2977,7 +3016,11 @@ class WR8208HD(WP804HD):
                     y0=y0,
                     sample_width_bytes=sample_width,
                     byte_order=byte_order,
-                    points=len(seg_raw) // sample_width if sample_width else len(seg_raw),
+                    points=self._resolve_points_with_wavedesc(
+                        payload_points=len(seg_raw) // sample_width if sample_width else len(seg_raw),
+                        wavedesc_points=wavedesc_points_per_segment,
+                        context=f"CH{channel} sequence-batch seg={seg_idx}",
+                    ),
                 )
             )
         t_split1 = time.perf_counter()

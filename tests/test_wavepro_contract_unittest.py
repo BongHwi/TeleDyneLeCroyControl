@@ -336,7 +336,7 @@ class WaveProContractTests(unittest.TestCase):
         data = scope.readout_sequence(channels=[1])
         self.assertIn(1, data)
         self.assertEqual(len(data[1]), 1)
-        self.assertEqual(data[1][0].points, 120)
+        self.assertEqual(data[1][0].points, 100)
 
     def test_sequence_readout_fetches_bulk_data_once_and_splits_locally(self) -> None:
         class _BulkSequenceTransport(_FakeTransport):
