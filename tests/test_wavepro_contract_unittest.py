@@ -772,6 +772,78 @@ class WaveProContractTests(unittest.TestCase):
         self.assertIn("vbs 'app.Measure.P1.View = false'", transport.writes)
         self.assertIn("F1:TRACE OFF", transport.writes)
 
+    def test_waverunner_sequence_readout_batch_mode_splits_using_even_payload_when_available(self) -> None:
+        class _UnevenBatchPayloadTransport(_FakeTransport):
+            def __init__(self) -> None:
+                super().__init__(payload_points=100, wavedesc_points=100)
+                self._next_points = 100
+
+            def write(self, command: str) -> None:
+                super().write(command)
+                match = core_scope.re.search(r"WF\? DAT1,NO,\d+,NP,(\d+)", command)
+                if match:
+                    self._next_points = int(match.group(1))
+
+            def read_raw(self) -> bytes:
+                # Simulate device returning a fixed segment payload size
+                # independent of requested NP count.
+                payload_points = 102
+                payload = bytes((i % 128 for i in range(payload_points)))
+                payload_len = len(payload)
+                block = f"#3{payload_len:03d}".encode("ascii") + payload
+                return block + b"\n"
+
+        transport = _UnevenBatchPayloadTransport()
+        scope = WR8208HD("127.0.0.1", protocol="lxi")
+        scope._scope = transport
+        scope._connected = True
+        scope._acquisition_config = AcquisitionConfig(tdiv=1e-9, sampling_period=1e-10, trigger_delay=0.0)
+        scope._sequence_config = SequenceConfig(enabled=True, num_segments=3)
+        scope._channel_configs = {1: ChannelConfig(vdiv=0.1, offset=0.0, enabled=True)}
+
+        data = scope.readout_sequence(channels=[1], sn_mode="batch", batch_segments=1)
+        self.assertIn(1, data)
+        self.assertEqual(len(data[1]), 3)
+        self.assertTrue(all(len(seg.raw_data) == 102 for seg in data[1]))
+
+    def test_waverunner_sequence_readout_batch_mode_splits_by_observed_chunk_size_when_not_even(self) -> None:
+        class _TrailingBytesBatchPayloadTransport(_FakeTransport):
+            def __init__(self) -> None:
+                super().__init__(payload_points=100, wavedesc_points=100)
+                self._next_points = 100
+                self._read_count = 0
+
+            def write(self, command: str) -> None:
+                super().write(command)
+                match = core_scope.re.search(r"WF\? DAT1,NO,\d+,NP,(\d+)", command)
+                if match:
+                    self._next_points = int(match.group(1))
+
+            def read_raw(self) -> bytes:
+                self._read_count += 1
+                payload_points = 102
+                # Last batch carries one trailing byte to emulate transport padding.
+                if self._read_count >= 3:
+                    payload = bytes((i % 128 for i in range(payload_points))) + b"\x00"
+                else:
+                    payload = bytes((i % 128 for i in range(payload_points)))
+                payload_len = len(payload)
+                block = f"#3{payload_len:03d}".encode("ascii") + payload
+                return block + b"\n"
+
+        transport = _TrailingBytesBatchPayloadTransport()
+        scope = WR8208HD("127.0.0.1", protocol="lxi")
+        scope._scope = transport
+        scope._connected = True
+        scope._acquisition_config = AcquisitionConfig(tdiv=1e-9, sampling_period=1e-10, trigger_delay=0.0)
+        scope._sequence_config = SequenceConfig(enabled=True, num_segments=3)
+        scope._channel_configs = {1: ChannelConfig(vdiv=0.1, offset=0.0, enabled=True)}
+
+        data = scope.readout_sequence(channels=[1], sn_mode="batch", batch_segments=1)
+        self.assertIn(1, data)
+        self.assertEqual(len(data[1]), 3)
+        self.assertTrue(all(len(seg.raw_data) == 102 for seg in data[1]))
+
     def test_waverunner_sequence_readout_auto_prefers_batch_for_large_segment_count(self) -> None:
         transport = _FakeTransport(payload_points=10, wavedesc_points=10)
         scope = WR8208HD("127.0.0.1", protocol="lxi")

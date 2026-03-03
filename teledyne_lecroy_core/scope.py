@@ -13,6 +13,7 @@ import logging
 import re
 import time
 import warnings
+from collections import Counter
 from abc import ABC, abstractmethod
 from itertools import count
 from pathlib import Path
@@ -2962,6 +2963,7 @@ class WR8208HD(WP804HD):
 
         batch_points = max(num_points, num_points * batch_segments)
         flat = bytearray()
+        chunk_byte_lengths: list[int] = []
         point_offset = 0
         t_xfer0 = time.perf_counter()
         while point_offset < total_target_points:
@@ -2976,6 +2978,7 @@ class WR8208HD(WP804HD):
             )
             if not chunk:
                 break
+            chunk_byte_lengths.append(len(chunk))
             flat.extend(chunk)
 
             points_read = len(chunk) // sample_width if sample_width else len(chunk)
@@ -2991,7 +2994,21 @@ class WR8208HD(WP804HD):
         bytes_per_segment = num_points * sample_width
         if bytes_per_segment <= 0:
             return []
-        full_segments = min(num_segments, len(raw) // bytes_per_segment)
+        split_bytes = bytes_per_segment
+        if num_segments > 0:
+            even_split_bytes = len(raw) // num_segments
+            if len(raw) % num_segments == 0 and even_split_bytes >= sample_width:
+                split_bytes = even_split_bytes
+            elif chunk_byte_lengths:
+                most_common_chunk_bytes, repeat_count = Counter(chunk_byte_lengths).most_common(1)[0]
+                aligned_chunk_bytes = most_common_chunk_bytes - (most_common_chunk_bytes % sample_width)
+                if (
+                    aligned_chunk_bytes >= sample_width
+                    and repeat_count >= 2
+                    and len(raw) // aligned_chunk_bytes > 0
+                ):
+                    split_bytes = aligned_chunk_bytes
+        full_segments = min(num_segments, len(raw) // split_bytes)
         if full_segments <= 0:
             return []
 
@@ -3002,8 +3019,8 @@ class WR8208HD(WP804HD):
         segments: list[WaveformData] = []
         t_split0 = time.perf_counter()
         for seg_idx in range(full_segments):
-            start = seg_idx * bytes_per_segment
-            end = start + bytes_per_segment
+            start = seg_idx * split_bytes
+            end = start + split_bytes
             seg_raw = raw[start:end]
             segments.append(
                 WaveformData(
